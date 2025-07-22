@@ -81,9 +81,9 @@ def get_cookie():
 
 def get_user_agent():
     return random.choice([
-        "Mozilla/5.0 (Windows NT 10; Win64; x64)…",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)…",
-        "Mozilla/5.0 (X11; Linux x86_64)…"
+        "Mozilla/5.0 (Windows NT 10; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     ])
 
 def get_session():
@@ -141,58 +141,32 @@ def fetch_creator_games(user_id):
     """List public universes for a creator."""
     games, cursor = [], ""
     base = f"https://games.roblox.com/v2/users/{user_id}/games"
+
     while True:
-        params = {"accessFilter":"Public","sortOrder":"Asc","limit":50}
+        params = {
+            "accessFilter": "Public",
+            "sortOrder": "Asc",
+            "limit": 50,
+        }
         if cursor:
             params["cursor"] = cursor
+
         query = "&".join(f"{k}={v}" for k, v in params.items())
         try:
             data = safe_get(f"{base}?{query}")
         except Exception as e:
             print(f"[UserGames] failed for {user_id}: {e}")
             return games
+
         for item in data.get("data", []):
             games.append({
-                "universeId": str(item.get("id")),
-                "name":       item.get("name","")
+                "universeId": str(item.get("id") or item.get("universeId")),
+                "name": item.get("name", ""),
             })
-        cursor = data.get("nextPageCursor","")
+        cursor = data.get("nextPageCursor", "")
         if not cursor:
             break
-    return games
 
-def fetch_user_groups(user_id):
-    """Get the groups a user belongs to."""
-    url = f"https://groups.roblox.com/v2/users/{user_id}/groups/roles"
-    try:
-        data = safe_get(url)
-        return [str(g["group"]["id"]) for g in data.get("data", []) if g.get("group","").get("id")]
-    except Exception as e:
-        print(f"[UserGroups] failed for {user_id}: {e}")
-        return []
-
-def fetch_group_games(group_id):
-    """List public universes for a group."""
-    games, cursor = [], ""
-    base = f"https://games.roblox.com/v2/groups/{group_id}/games"
-    while True:
-        params = {"accessFilter":"Public","sortOrder":"Asc","limit":50}
-        if cursor:
-            params["cursor"] = cursor
-        query = "&".join(f"{k}={v}" for k, v in params.items())
-        try:
-            data = safe_get(f"{base}?{query}")
-        except Exception as e:
-            print(f"[GroupGames] failed for {group_id}: {e}")
-            return games
-        for item in data.get("data", []):
-            games.append({
-                "universeId": str(item.get("id")),
-                "name":       item.get("name","")
-            })
-        cursor = data.get("nextPageCursor","")
-        if not cursor:
-            break
     return games
 
 # ─── Roblox API – Metadata & Votes ────────────────────────────────────────────
@@ -200,8 +174,8 @@ def get_game_details(universe_ids):
     """Fetch metadata for a list of universe IDs."""
     details = []
     for i in range(0, len(universe_ids), BATCH_SIZE):
-        chunk = universe_ids[i:i+BATCH_SIZE]
-        ids = ",".join(chunk)
+        chunk = universe_ids[i : i + BATCH_SIZE]
+        ids = ",".join(str(uid) for uid in chunk)
         url = f"https://games.roblox.com/v1/games?universeIds={ids}"
         try:
             data = safe_get(url)
@@ -214,40 +188,33 @@ def get_game_votes(universe_ids):
     """Fetch vote counts for a list of universe IDs."""
     votes = {}
     for i in range(0, len(universe_ids), BATCH_SIZE):
-        chunk = universe_ids[i:i+BATCH_SIZE]
-        ids = ",".join(chunk)
+        chunk = universe_ids[i : i + BATCH_SIZE]
+        ids = ",".join(str(uid) for uid in chunk)
         url = f"https://games.roblox.com/v1/games/votes?universeIds={ids}"
         try:
             data = safe_get(url)
             for v in data.get("data", []):
-                uid = str(v.get("id",""))
-                votes[uid] = {"upVotes":v.get("upVotes",0),"downVotes":v.get("downVotes",0)}
+                uid = str(v.get("id", ""))
+                votes[uid] = {
+                    "upVotes": v.get("upVotes", 0),
+                    "downVotes": v.get("downVotes", 0),
+                }
         except Exception as e:
             print(f"[Votes] chunk {i//BATCH_SIZE+1} failed: {e}")
     return votes
 
-# ─── Main Workflow ─────────────────────────────────────────────────────────────
+
 def main():
     print("Starting Roblox data collection...\n")
     all_ids = set()
 
     for uid in CREATORS:
         print(f"> Creator {uid}")
-        # creator's own games
-        cg = fetch_creator_games(uid)
-        print(f"  → {len(cg)} personal games")
-        # user's groups
-        gids = fetch_user_groups(uid)
-        print(f"  → {len(gids)} groups")
-        gg = []
-        for gid in gids:
-            gms = fetch_group_games(gid)
-            print(f"    • group {gid}: {len(gms)} games")
-            gg.extend(gms)
-        # combine and dedupe
-        for g in cg + gg:
+        games = fetch_creator_games(uid)
+        print(f"  → Found {len(games)}")
+        for g in games:
             all_ids.add(g["universeId"])
-        print(f"  → Total unique games so far: {len(all_ids)}")
+        print(f"  → Total unique so far: {len(all_ids)}")
 
     all_ids = list(all_ids)
     if not all_ids:
@@ -255,7 +222,8 @@ def main():
         return
 
     print("\n> Fetching metadata…")
-    meta  = get_game_details(all_ids)
+    meta = get_game_details(all_ids)
+
     print("> Fetching votes…")
     votes = get_game_votes(all_ids)
 
@@ -280,8 +248,10 @@ def main():
     df.to_csv("test_data.csv", index=False)
     print(f"\n✅ Wrote {len(df)} records to test_data.csv")
 
+    # -------------------- Moved INSIDE main() --------------------
     print("\nPreview of test_data.csv:")
     print(df.head(10).to_string(index=False))
+    # ------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
