@@ -238,63 +238,44 @@ def get_user_created_games(user_id):
     
     return games
 
+# ─── Roblox Metadata & Votes (fixed) ──────────────────────────────────────────
+
 def get_game_details(universe_ids):
-    """Get detailed information for games by universe IDs."""
-    if not universe_ids:
-        return []
-        
-    # Split into chunks to avoid URL length limits
-    chunk_size = 100
-    all_games = []
-    
-    for i in range(0, len(universe_ids), chunk_size):
-        chunk = universe_ids[i:i + chunk_size]
-        universe_ids_str = ",".join(chunk)
-        
-        url = f"https://games.roblox.com/v1/games"
-        params = {"universeIds": universe_ids_str}
-        
+    """POST to /v1/games with JSON body {'universeIds': [...]}."""
+    details = []
+    # chunk into 100s to avoid huge payloads
+    for i in range(0, len(universe_ids), 100):
+        chunk = universe_ids[i : i + 100]
         try:
-            data = safe_get(url)
-            games = data.get("data", [])
-            all_games.extend(games)
-            
+            data = safe_post(
+                "https://games.roblox.com/v1/games",
+                json={"universeIds": chunk}
+            )
+            details.extend(data.get("data", []))
         except Exception as e:
-            print(f"  ! Error fetching game details for chunk: {e}")
-            continue
-    
-    return all_games
+            print(f"  ! Metadata chunk {i//100+1} failed: {e}")
+    return details
 
 def get_game_votes(universe_ids):
-    """Get vote information (likes/dislikes) for games."""
-    if not universe_ids:
-        return {}
-        
-    votes_data = {}
-    
-    # Process in chunks
-    chunk_size = 100
-    for i in range(0, len(universe_ids), chunk_size):
-        chunk = universe_ids[i:i + chunk_size]
-        universe_ids_str = ",".join(chunk)
-        
-        url = f"https://games.roblox.com/v1/games/votes"
-        params = {"universeIds": universe_ids_str}
-        
+    """POST to /v1/games/votes with JSON body {'universeIds': [...]}."""
+    votes = {}
+    for i in range(0, len(universe_ids), 100):
+        chunk = universe_ids[i : i + 100]
         try:
-            data = safe_get(url)
-            for vote_info in data.get("data", []):
-                universe_id = str(vote_info.get("id", ""))
-                votes_data[universe_id] = {
-                    "upVotes": vote_info.get("upVotes", 0),
-                    "downVotes": vote_info.get("downVotes", 0)
+            data = safe_post(
+                "https://games.roblox.com/v1/games/votes",
+                json={"universeIds": chunk}
+            )
+            for v in data.get("data", []):
+                uid = str(v.get("id", ""))
+                votes[uid] = {
+                    "upVotes":   v.get("upVotes", 0),
+                    "downVotes": v.get("downVotes", 0)
                 }
-                
         except Exception as e:
-            print(f"  ! Error fetching votes for chunk: {e}")
-            continue
-    
-    return votes_data
+            print(f"  ! Votes chunk {i//100+1} failed: {e}")
+    return votes
+
 
 # ─── Main Workflow ─────────────────────────────────────────────────────────────
 
