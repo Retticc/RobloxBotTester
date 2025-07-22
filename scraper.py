@@ -7,91 +7,81 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ─── Config ───────────────────────────────────────────────────────────────────
-CREATORS        = [u.strip() for u in os.getenv("TARGET_CREATORS","").split(",") if u.strip()]
-TOKENS          = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS","").split(",") if t.strip()]
-BATCH_SIZE      = int(os.getenv("BATCH_SIZE","100"))
-RATE_LIMIT_DELAY= float(os.getenv("RATE_LIMIT_DELAY","0.7"))
+# ─── Configuration ─────────────────────────────────────────────────────────────
 
-# Proxy service settings
-PROXY_API_KEY   = os.getenv("PROXY_API_KEY","")  # your VbHjBpTosZvZ
-PROXY_API_BASE  = os.getenv(
-    "PROXY_API_BASE",
-    "https://proxy-ipv4.com/client-api/v1"
-)
+CREATORS         = [u.strip() for u in os.getenv("TARGET_CREATORS","").split(",") if u.strip()]
+TOKENS           = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS","").split(",") if t.strip()]
+BATCH_SIZE       = int(os.getenv("BATCH_SIZE","100"))
+RATE_LIMIT_DELAY = float(os.getenv("RATE_LIMIT_DELAY","0.7"))
+PROXY_API_KEY    = os.getenv("PROXY_API_KEY","")
+# Correct base per your provider docs:
+PROXY_API_BASE   = os.getenv("PROXY_API_BASE","https://proxy‑ipv4.com/client-api/v1")
 PROXY_URLS_FALLBACK = [
     p.strip() for p in os.getenv("PROXY_URLS","").split(",") if p.strip()
 ]
 
-# Fields to pull from Roblox
 FIELDS = [
     "universeId","name","playing","visits",
     "favorites","likeCount","dislikeCount",
     "genre","price","creatorType"
 ]
 
-# ─── Proxy Fetching ────────────────────────────────────────────────────────────
-def fetch_proxies():
-    """Fetch all proxy types via your provider's API."""
+# ─── Proxy Handling ────────────────────────────────────────────────────────────
+
+def fetch_proxies_from_api():
+    """Call GET /client-api/v1/<key>/get/proxies to list all proxy types."""
     if not PROXY_API_KEY:
         return []
-    url = f"{PROXY_API_BASE}/{PROXY_API_KEY}/get/proxies"
     try:
+        url = f"{PROXY_API_BASE}/{PROXY_API_KEY}/get/proxies"
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
     except Exception as e:
-        print(f"Proxy API error, falling back to manual list: {e}")
+        print(f"Proxy API error, using fallback list: {e}")
         return []
-
-    js = resp.json()
+    data = resp.json()
     proxies = []
     # IPv4
-    for entry in js.get("ipv4", []):
+    for entry in data.get("ipv4", []):
         ip = entry["ip"]
         login = entry["authInfo"]["login"]
         pw    = entry["authInfo"]["password"]
-        https_p = entry.get("httpsPort")
-        socks_p = entry.get("socks5Port")
-        if https_p:
-            proxies.append(f"http://{login}:{pw}@{ip}:{https_p}")
-        if socks_p:
-            proxies.append(f"socks5://{login}:{pw}@{ip}:{socks_p}")
+        if port := entry.get("httpsPort"):
+            proxies.append(f"http://{login}:{pw}@{ip}:{port}")
+        if port := entry.get("socks5Port"):
+            proxies.append(f"socks5://{login}:{pw}@{ip}:{port}")
     # IPv6
-    for entry in js.get("ipv6", []):
-        for ip_obj in entry.get("ips", []):
-            ip = ip_obj["ip"]
-            login = ip_obj["authInfo"]["login"]
-            pw    = ip_obj["authInfo"]["password"]
-            proto = ip_obj["protocol"].lower()
-            proxies.append(f"{proto}://{login}:{pw}@{ip}")
+    for order in data.get("ipv6", []):
+        for ip_info in order.get("ips", []):
+            proto = ip_info["protocol"].lower()
+            hostport = ip_info["ip"]
+            auth = ip_info["authInfo"]
+            proxies.append(f"{proto}://{auth['login']}:{auth['password']}@{hostport}")
     # ISP
-    for entry in js.get("isp", []):
+    for entry in data.get("isp", []):
         ip = entry["ip"]
-        login, pw = entry["authInfo"]["login"], entry["authInfo"]["password"]
-        https_p = entry.get("httpsPort")
-        socks_p = entry.get("socks5Port")
-        if https_p:
-            proxies.append(f"http://{login}:{pw}@{ip}:{https_p}")
-        if socks_p:
-            proxies.append(f"socks5://{login}:{pw}@{ip}:{socks_p}")
+        login,pw = entry["authInfo"]["login"], entry["authInfo"]["password"]
+        if port := entry.get("httpsPort"):
+            proxies.append(f"http://{login}:{pw}@{ip}:{port}")
+        if port := entry.get("socks5Port"):
+            proxies.append(f"socks5://{login}:{pw}@{ip}:{port}")
     # Mobile
-    for entry in js.get("mobile", []):
+    for entry in data.get("mobile", []):
         ip = entry["ip"]
-        login, pw = entry["authInfo"]["login"], entry["authInfo"]["password"]
-        https_p = entry.get("httpsPort")
-        socks_p = entry.get("socks5Port")
-        if https_p:
-            proxies.append(f"http://{login}:{pw}@{ip}:{https_p}")
-        if socks_p:
-            proxies.append(f"socks5://{login}:{pw}@{ip}:{socks_p}")
+        login,pw = entry["authInfo"]["login"], entry["authInfo"]["password"]
+        if port := entry.get("httpsPort"):
+            proxies.append(f"http://{login}:{pw}@{ip}:{port}")
+        if port := entry.get("socks5Port"):
+            proxies.append(f"socks5://{login}:{pw}@{ip}:{port}")
     return proxies
 
-# Build final proxy list
-_proxies = fetch_proxies()
-PROXIES = _proxies if _proxies else PROXY_URLS_FALLBACK
+# build PROXIES
+_prox = fetch_proxies_from_api()
+PROXIES = _prox if _prox else PROXY_URLS_FALLBACK
 print(f"→ Using {len(PROXIES)} proxies")
 
 # ─── HTTP Utilities ────────────────────────────────────────────────────────────
+
 _cookie_idx = 0
 def get_cookie():
     global _cookie_idx
@@ -125,21 +115,26 @@ def safe_get(url):
             r.raise_for_status()
         return r.json()
     except Exception as e:
-        print(f"  ! Request failed for {url}: {e}")
+        print(f"  ! Request error: {e}")
         raise
 
-# ─── Roblox Fetchers ───────────────────────────────────────────────────────────
+# ─── Roblox Endpoints ─────────────────────────────────────────────────────────
 
 def fetch_creator_games(uid):
-    games, cursor = [], ""
+    """Use v1/games?creatorIds=... without empty cursor param."""
+    games, cursor = [], None
     while True:
         url = (f"https://games.roblox.com/v1/games"
-               f"?creatorIds={uid}&limit=50&cursor={cursor}")
+               f"?creatorIds={uid}&limit=50&sortOrder=Asc")
+        if cursor:
+            url += f"&cursor={cursor}"
         data = safe_get(url)
         for g in data.get("data",[]):
-            games.append({"id":str(g.get("universeId") or g.get("id")),
-                          "name":g.get("name")})
-        cursor = data.get("nextPageCursor","")
+            games.append({
+                "id": str(g.get("universeId") or g.get("id")),
+                "name": g.get("name")
+            })
+        cursor = data.get("nextPageCursor")
         if not cursor:
             break
     return games
@@ -150,26 +145,26 @@ def fetch_game_meta(ids):
     data = safe_get(url)
     return data.get("data",[])
 
-# ─── Main ──────────────────────────────────────────────────────────────────────
+# ─── Main Workflow ─────────────────────────────────────────────────────────────
 
 def main():
     all_ids = set()
     for uid in CREATORS:
-        print(f"> Fetching for creator {uid}")
+        print(f"> Creator {uid}")
         try:
             for g in fetch_creator_games(uid):
                 all_ids.add(g["id"])
         except:
-            print(f"  ! Skipping {uid}")
+            print(f"  ! Skip {uid}")
         print(f"  → {len(all_ids)} IDs so far")
 
     all_ids = list(all_ids)
-    print(f"\nTotal games to fetch: {len(all_ids)}\n")
+    print(f"\nTotal games: {len(all_ids)}\n")
 
     rows = []
     for i in range(0, len(all_ids), BATCH_SIZE):
         batch = all_ids[i:i+BATCH_SIZE]
-        print(f"> Batch {i//BATCH_SIZE+1} ({len(batch)} IDs)")
+        print(f"> Batch {i//BATCH_SIZE+1} ({len(batch)})")
         try:
             for g in fetch_game_meta(batch):
                 rows.append({f:g.get(f) for f in FIELDS})
