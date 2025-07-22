@@ -203,7 +203,7 @@ def get_game_votes(universe_ids):
             print(f"[Votes] chunk {i//BATCH_SIZE+1} failed: {e}")
     return votes
 
-# ─── Main Workflow ─────────────────────────────────────────────────────────────
+
 def main():
     print("Starting Roblox data collection...\n")
     all_ids = set()
@@ -244,13 +244,14 @@ def main():
             "creator":     g.get("creator",{}).get("name","")
         })
 
-df = pd.DataFrame(records)
+    df = pd.DataFrame(records)
     df.to_csv("test_data.csv", index=False)
     print(f"\n✅ Wrote {len(df)} records to test_data.csv")
 
-    # Now print out the first 10 rows of the DataFrame:
+    # -------------------- Moved INSIDE main() --------------------
     print("\nPreview of test_data.csv:")
     print(df.head(10).to_string(index=False))
+    # ------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
