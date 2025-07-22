@@ -30,7 +30,6 @@ def fetch_proxies_from_api():
     """Fetch proxies from your provider's API."""
     if not PROXY_API_KEY:
         return []
-
     try:
         resp = requests.get(f"{PROXY_API_BASE}/{PROXY_API_KEY}/get/proxies", timeout=10)
         resp.raise_for_status()
@@ -38,35 +37,33 @@ def fetch_proxies_from_api():
     except Exception as e:
         print(f"[ProxyAPI] error: {e}")
         return []
-
     proxies = []
     # IPv4
     for e in data.get("ipv4", []):
-        ip = e["ip"]
+        ip   = e["ip"]
         auth = e["authInfo"]
-        for port_key, scheme in (("httpsPort", "http"), ("socks5Port", "socks5")):
+        for port_key, scheme in (("httpsPort","http"),("socks5Port","socks5")):
             if port := e.get(port_key):
                 proxies.append(f"{scheme}://{auth['login']}:{auth['password']}@{ip}:{port}")
     # IPv6
     for order in data.get("ipv6", []):
         for ipinfo in order.get("ips", []):
-            proto = ipinfo["protocol"].lower()
+            proto  = ipinfo["protocol"].lower()
             ipport = ipinfo["ip"]
-            auth  = ipinfo["authInfo"]
+            auth   = ipinfo["authInfo"]
             proxies.append(f"{proto}://{auth['login']}:{auth['password']}@{ipport}")
     # ISP & Mobile
-    for key in ("isp", "mobile"):
+    for key in ("isp","mobile"):
         for e in data.get(key, []):
             ip   = e["ip"]
             auth = e["authInfo"]
-            for port_key, scheme in (("httpsPort", "http"), ("socks5Port", "socks5")):
+            for port_key, scheme in (("httpsPort","http"),("socks5Port","socks5")):
                 if port := e.get(port_key):
                     proxies.append(f"{scheme}://{auth['login']}:{auth['password']}@{ip}:{port}")
-
     return proxies
 
-_fetched = fetch_proxies_from_api()
-PROXIES = _fetched if _fetched else PROXY_URLS_FALLBACK
+_proxies = fetch_proxies_from_api()
+PROXIES = _proxies if _proxies else PROXY_URLS_FALLBACK
 print(f"→ Using {len(PROXIES)} proxies")
 
 # ─── HTTP Helpers ─────────────────────────────────────────────────────────────
@@ -81,9 +78,9 @@ def get_cookie():
 
 def get_user_agent():
     return random.choice([
-        "Mozilla/5.0 (Windows NT 10; Win64; x64) ...",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ...",
-        "Mozilla/5.0 (X11; Linux x86_64) ..."
+        "Mozilla/5.0 (Windows NT 10; Win64; x64)…",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)…",
+        "Mozilla/5.0 (X11; Linux x86_64)…"
     ])
 
 def get_session():
@@ -94,59 +91,60 @@ def get_session():
     return sess
 
 def safe_get(url, retries=3):
-    for attempt in range(retries):
-        time.sleep(RATE_LIMIT_DELAY + random.random() * 0.3)
+    for i in range(retries):
+        time.sleep(RATE_LIMIT_DELAY + random.random()*0.3)
         sess = get_session()
         try:
-            resp = sess.get(
+            r = sess.get(
                 url,
                 headers={"User-Agent": get_user_agent(), "Accept": "application/json"},
                 cookies=get_cookie(),
                 timeout=30
             )
-            if resp.ok:
-                return resp.json()
-            print(f"[GET] HTTP {resp.status_code} @ {url}")
-            resp.raise_for_status()
+            if r.ok:
+                return r.json()
+            print(f"[GET] HTTP {r.status_code} @ {url}")
+            r.raise_for_status()
         except Exception as e:
-            print(f"[GET] attempt {attempt+1} error: {e}")
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+            print(f"[GET] attempt {i+1} error: {e}")
+            if i < retries - 1:
+                time.sleep(2**i)
     raise RuntimeError(f"GET failed after {retries} attempts: {url}")
 
 def safe_post(url, json=None, retries=3):
-    """Perform a POST request with retries, backoff, proxy & token rotation."""
-    for attempt in range(retries):
-        time.sleep(RATE_LIMIT_DELAY + random.random() * 0.3)
+    for i in range(retries):
+        time.sleep(RATE_LIMIT_DELAY + random.random()*0.3)
         sess = get_session()
         try:
-            resp = sess.post(
+            r = sess.post(
                 url,
                 headers={"User-Agent": get_user_agent(), "Accept": "application/json"},
                 cookies=get_cookie(),
                 json=json,
                 timeout=30
             )
-            if resp.ok:
-                return resp.json()
-            print(f"[POST] HTTP {resp.status_code} @ {url} payload={json}")
-            resp.raise_for_status()
+            if r.ok:
+                return r.json()
+            print(f"[POST] HTTP {r.status_code} @ {url} payload={json}")
+            r.raise_for_status()
         except Exception as e:
-            print(f"[POST] attempt {attempt+1} error: {e}")
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+            print(f"[POST] attempt {i+1} error: {e}")
+            if i < retries - 1:
+                time.sleep(2**i)
     raise RuntimeError(f"POST failed after {retries} attempts: {url}")
 
 # ─── Roblox API – Game Listing ────────────────────────────────────────────────
 def fetch_creator_games(user_id):
-    """POST to /v1/games/list to get all games by a creator."""
+    """
+    POST to /v1/universes/list to list all universes (games) by a creator.
+    """
     games, cursor = [], ""
-    url = "https://games.roblox.com/v1/games/list"
+    url = "https://games.roblox.com/v1/universes/list"
     while True:
         payload = {
             "model": {
-                "creatorId":   int(user_id),
                 "creatorType": "User",
+                "creatorId":   int(user_id),
                 "limit":       50,
                 "cursor":      cursor
             }
@@ -154,21 +152,22 @@ def fetch_creator_games(user_id):
         try:
             data = safe_post(url, json=payload)
         except Exception as e:
-            print(f"[GamesList] failed for {user_id}: {e}")
+            print(f"[UniversesList] failed for {user_id}: {e}")
             return games
-        for g in data.get("games", []):
+
+        for uni in data.get("universes", []):
             games.append({
-                "universeId": str(g.get("universeId") or g.get("id")),
-                "name":       g.get("name", "")
+                "universeId": str(uni.get("id") or uni.get("universeId")),
+                "name":       uni.get("name", "")
             })
         cursor = data.get("nextPageCursor", "")
         if not cursor:
             break
+
     return games
 
 # ─── Roblox API – Metadata & Votes ────────────────────────────────────────────
 def get_game_details(universe_ids):
-    """POST to /v1/games with JSON body {'universeIds': [...]}."""
     details = []
     for i in range(0, len(universe_ids), 100):
         chunk = universe_ids[i : i + 100]
@@ -180,7 +179,6 @@ def get_game_details(universe_ids):
     return details
 
 def get_game_votes(universe_ids):
-    """POST to /v1/games/votes with JSON body {'universeIds': [...]}."""
     votes = {}
     for i in range(0, len(universe_ids), 100):
         chunk = universe_ids[i : i + 100]
@@ -188,25 +186,21 @@ def get_game_votes(universe_ids):
             data = safe_post("https://games.roblox.com/v1/games/votes", json={"universeIds": chunk})
             for v in data.get("data", []):
                 uid = str(v.get("id", ""))
-                votes[uid] = {
-                    "upVotes":   v.get("upVotes", 0),
-                    "downVotes": v.get("downVotes", 0)
-                }
+                votes[uid] = {"upVotes": v.get("upVotes",0), "downVotes": v.get("downVotes",0)}
         except Exception as e:
             print(f"[Votes] chunk {i//100+1} failed: {e}")
     return votes
 
 # ─── Main Workflow ─────────────────────────────────────────────────────────────
 def main():
-    print("Starting Roblox game data collection...\n")
+    print("Starting Roblox data collection...\n")
     all_ids = set()
 
-    # 1) List games per creator
     for uid in CREATORS:
         print(f"> Creator {uid}")
-        gms = fetch_creator_games(uid)
-        print(f"  → Found {len(gms)} games")
-        for g in gms:
+        games = fetch_creator_games(uid)
+        print(f"  → Found {len(games)}")
+        for g in games:
             all_ids.add(g["universeId"])
         print(f"  → Total unique so far: {len(all_ids)}")
 
@@ -215,32 +209,28 @@ def main():
         print("No games found; exiting.")
         return
 
-    # 2) Fetch metadata
     print("\n> Fetching metadata…")
-    games_meta = get_game_details(all_ids)
+    meta = get_game_details(all_ids)
 
-    # 3) Fetch votes
     print("> Fetching votes…")
     votes = get_game_votes(all_ids)
 
-    # 4) Merge & save
     records = []
-    for gm in games_meta:
-        uid = str(gm.get("universeId") or gm.get("id"))
-        rec = {
+    for g in meta:
+        uid = str(g.get("universeId") or g.get("id"))
+        records.append({
             "universeId":  uid,
-            "name":        gm.get("name", ""),
-            "playing":     gm.get("playing", 0),
-            "visits":      gm.get("visits", 0),
-            "favorites":   gm.get("favoritedCount", 0),
-            "likeCount":   votes.get(uid, {}).get("upVotes", 0),
-            "dislikeCount":votes.get(uid, {}).get("downVotes", 0),
-            "genre":       gm.get("genre", ""),
-            "price":       gm.get("price", 0),
-            "creatorType": gm.get("creator", {}).get("type", ""),
-            "creator":     gm.get("creator", {}).get("name", "")
-        }
-        records.append(rec)
+            "name":        g.get("name",""),
+            "playing":     g.get("playing",0),
+            "visits":      g.get("visits",0),
+            "favorites":   g.get("favoritedCount",0),
+            "likeCount":   votes.get(uid,{}).get("upVotes",0),
+            "dislikeCount":votes.get(uid,{}).get("downVotes",0),
+            "genre":       g.get("genre",""),
+            "price":       g.get("price",0),
+            "creatorType": g.get("creator",{}).get("type",""),
+            "creator":     g.get("creator",{}).get("name","")
+        })
 
     df = pd.DataFrame(records)
     df.to_csv("test_data.csv", index=False)
