@@ -247,6 +247,9 @@ def main():
     df = pd.DataFrame(records)
     df.to_csv("test_data.csv", index=False)
     print(f"\n✅ Wrote {len(df)} records to test_data.csv")
+    import pandas as pd
+df = pd.read_csv("test_data.csv")
+print(df.head(10).to_string(index=False))
 
 if __name__ == "__main__":
     main()
