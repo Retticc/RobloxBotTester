@@ -1,0 +1,11 @@
+# Comma‑separated Roblox creator user IDs to test (10 IDs)
+TARGET_CREATORS=12345,67890,11223,44556,77889,99001,22334,55667,88990,10112
+
+# Five .ROBLOSECURITY cookie values for authenticated requests
+ROBLOSECURITY_TOKENS=token1,token2,token3,token4,token5
+
+# How many universeIds per /v1/games call
+BATCH_SIZE=100
+
+# Delay in seconds between each HTTP request (to stay under 60–100 req/min)
+RATE_LIMIT_DELAY=0.7
