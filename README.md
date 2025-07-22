@@ -9,7 +9,7 @@ Test authenticated data scraping for Roblox creators using multiple account cook
 2. **Copy** `.env.example` → `.env` and fill in:
    - `TARGET_CREATORS`: comma‑separated user IDs
    - `ROBLOSECURITY_TOKENS`: comma‑separated `.ROBLOSECURITY` cookies (5 max)
-   - `BATCH_SIZE`: how many universe IDs per API call
+  - `BATCH_SIZE`: how many universe IDs per API call (max 100)
    - `RATE_LIMIT_DELAY`: seconds to wait between requests (e.g. 0.7)
 3. **Install** dependencies:
    ```bash
