@@ -81,9 +81,9 @@ def get_cookie():
 
 def get_user_agent():
     return random.choice([
-        "Mozilla/5.0 (Windows NT 10; Win64; x64)…",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)…",
-        "Mozilla/5.0 (X11; Linux x86_64)…"
+        "Mozilla/5.0 (Windows NT 10; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     ])
 
 def get_session():
@@ -138,30 +138,30 @@ def safe_post(url, json=None, retries=3):
 
 # ─── Roblox API – Game Listing ────────────────────────────────────────────────
 def fetch_creator_games(user_id):
-    """
-    POST to /v1/universes/list to list all universes (games) by a creator.
-    """
+    """List public universes for a creator."""
     games, cursor = [], ""
-    url = "https://games.roblox.com/v1/universes/list"
+    base = f"https://games.roblox.com/v2/users/{user_id}/games"
+
     while True:
-        payload = {
-            "model": {
-                "creatorType": "User",
-                "creatorId":   int(user_id),
-                "limit":       50,
-                "cursor":      cursor
-            }
+        params = {
+            "accessFilter": "Public",
+            "sortOrder": "Asc",
+            "limit": 50,
         }
+        if cursor:
+            params["cursor"] = cursor
+
+        query = "&".join(f"{k}={v}" for k, v in params.items())
         try:
-            data = safe_post(url, json=payload)
+            data = safe_get(f"{base}?{query}")
         except Exception as e:
-            print(f"[UniversesList] failed for {user_id}: {e}")
+            print(f"[UserGames] failed for {user_id}: {e}")
             return games
 
-        for uni in data.get("universes", []):
+        for item in data.get("data", []):
             games.append({
-                "universeId": str(uni.get("id") or uni.get("universeId")),
-                "name":       uni.get("name", "")
+                "universeId": str(item.get("id") or item.get("universeId")),
+                "name": item.get("name", ""),
             })
         cursor = data.get("nextPageCursor", "")
         if not cursor:
