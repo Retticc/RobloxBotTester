@@ -10,7 +10,10 @@ load_dotenv()
 # ─── Configuration ─────────────────────────────────────────────────────────────
 CREATORS         = [u.strip() for u in os.getenv("TARGET_CREATORS", "").split(",") if u.strip()]
 TOKENS           = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS", "").split(",") if t.strip()]
-BATCH_SIZE       = int(os.getenv("BATCH_SIZE", "100"))
+# Roblox's API only accepts up to 100 IDs per request
+MAX_IDS_PER_REQ  = 100
+env_batch        = int(os.getenv("BATCH_SIZE", "100"))
+BATCH_SIZE       = max(1, min(env_batch, MAX_IDS_PER_REQ))
 RATE_LIMIT_DELAY = float(os.getenv("RATE_LIMIT_DELAY", "0.7"))
 
 # Proxy service settings
@@ -168,27 +171,36 @@ def fetch_creator_games(user_id):
 
 # ─── Roblox API – Metadata & Votes ────────────────────────────────────────────
 def get_game_details(universe_ids):
+    """Fetch metadata for a list of universe IDs."""
     details = []
-    for i in range(0, len(universe_ids), 100):
-        chunk = universe_ids[i : i + 100]
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        chunk = universe_ids[i : i + BATCH_SIZE]
+        ids = ",".join(str(uid) for uid in chunk)
+        url = f"https://games.roblox.com/v1/games?universeIds={ids}"
         try:
-            data = safe_post("https://games.roblox.com/v1/games", json={"universeIds": chunk})
+            data = safe_get(url)
             details.extend(data.get("data", []))
         except Exception as e:
-            print(f"[Meta] chunk {i//100+1} failed: {e}")
+            print(f"[Meta] chunk {i//BATCH_SIZE+1} failed: {e}")
     return details
 
 def get_game_votes(universe_ids):
+    """Fetch vote counts for a list of universe IDs."""
     votes = {}
-    for i in range(0, len(universe_ids), 100):
-        chunk = universe_ids[i : i + 100]
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        chunk = universe_ids[i : i + BATCH_SIZE]
+        ids = ",".join(str(uid) for uid in chunk)
+        url = f"https://games.roblox.com/v1/games/votes?universeIds={ids}"
         try:
-            data = safe_post("https://games.roblox.com/v1/games/votes", json={"universeIds": chunk})
+            data = safe_get(url)
             for v in data.get("data", []):
                 uid = str(v.get("id", ""))
-                votes[uid] = {"upVotes": v.get("upVotes",0), "downVotes": v.get("downVotes",0)}
+                votes[uid] = {
+                    "upVotes": v.get("upVotes", 0),
+                    "downVotes": v.get("downVotes", 0),
+                }
         except Exception as e:
-            print(f"[Votes] chunk {i//100+1} failed: {e}")
+            print(f"[Votes] chunk {i//BATCH_SIZE+1} failed: {e}")
     return votes
 
 # ─── Main Workflow ─────────────────────────────────────────────────────────────
