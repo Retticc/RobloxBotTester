@@ -9,25 +9,21 @@ load_dotenv()
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-# Roblox creators to test (comma‑separated)
-CREATORS = os.getenv("TARGET_CREATORS", "").split(",")
+# Roblox creators to test (comma‑separated, whitespace stripped)
+CREATORS = [uid.strip() for uid in os.getenv("TARGET_CREATORS", "").split(",") if uid.strip()]
 
-# Five .ROBLOSECURITY tokens (comma‑separated)
-TOKENS = os.getenv("ROBLOSECURITY_TOKENS", "").split(",")
-
-# How many universeIds per /v1/games batch call
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
-
-# Delay between each HTTP request (seconds)
+# Auth tokens, batch size, rate‑limit delay
+TOKENS           = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS", "").split(",") if t.strip()]
+BATCH_SIZE       = int(os.getenv("BATCH_SIZE", "100"))
 RATE_LIMIT_DELAY = float(os.getenv("RATE_LIMIT_DELAY", "0.7"))
 
-# Proxy setup: either a static list or fetched via your provider’s API
-PROXY_API_KEY = os.getenv("PROXY_API_KEY")      # your VbHjBpTosZvZ key
-PROXY_URLS    = os.getenv("PROXY_URLS", "").split(",")  # optional fallback
+# Proxy API / static list
+PROXY_API_KEY = os.getenv("API_KEY")
+PROXY_URLS    = [p.strip() for p in os.getenv("PROXY_URLS", "").split(",") if p.strip()]
 
 API_BASE_URL = "https://api.ipv4proxy.com/client-api/v1"
 
-# Fields to capture from the Roblox /v1/games endpoint
+# Fields to capture from /v1/games
 FIELDS = [
     "universeId", "name", "playing", "visits",
     "favorites", "likeCount", "dislikeCount",
@@ -37,13 +33,12 @@ FIELDS = [
 # ─── Proxy Handling ────────────────────────────────────────────────────────────
 
 def fetch_ipv6_proxies():
-    """Fetch active IPv6 proxies from provider API."""
     url = f"{API_BASE_URL}/{PROXY_API_KEY}/get/proxies"
     params = {"proxyType": "ipv6"}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    proxies = []
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    out = []
     for order in data.get("proxies", []):
         for ip_info in order.get("ips", []):
             proto = ip_info.get("protocol", "HTTP").lower()
@@ -52,35 +47,32 @@ def fetch_ipv6_proxies():
             user = auth.get("login")
             pw   = auth.get("password")
             if user and pw:
-                proxies.append(f"{proto}://{user}:{pw}@{hostport}")
+                out.append(f"{proto}://{user}:{pw}@{hostport}")
             else:
-                # no auth info, just host:port
-                proxies.append(f"{proto}://{hostport}")
-    return proxies
+                out.append(f"{proto}://{hostport}")
+    return out
 
-# Build the PROXIES list
+# build PROXIES list
 if PROXY_API_KEY:
     try:
         PROXIES = fetch_ipv6_proxies()
         print(f"Fetched {len(PROXIES)} proxies via API")
     except Exception as e:
-        print(f"Error fetching proxies via API: {e}")
-        PROXIES = [p for p in PROXY_URLS if p]
+        print(f"Proxy API error: {e}")
+        PROXIES = PROXY_URLS
 else:
-    PROXIES = [p for p in PROXY_URLS if p]
+    PROXIES = PROXY_URLS
 
 # ─── Request Utilities ─────────────────────────────────────────────────────────
 
 _cookie_idx = 0
 def get_cookie():
-    """Round‑robin selection of .ROBLOSECURITY tokens."""
     global _cookie_idx
     token = TOKENS[_cookie_idx % len(TOKENS)]
     _cookie_idx += 1
     return {".ROBLOSECURITY": token}
 
 def get_user_agent():
-    """Random User‑Agent from a small fallback list."""
     return random.choice([
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)...",
@@ -88,37 +80,30 @@ def get_user_agent():
     ])
 
 def get_proxy_session():
-    """Return a requests.Session routed through a random proxy (if any)."""
     sess = requests.Session()
     if PROXIES:
         proxy = random.choice(PROXIES)
-        sess.proxies.update({
-            "http":  proxy,
-            "https": proxy
-        })
+        sess.proxies.update({"http": proxy, "https": proxy})
     return sess
 
 def safe_get(url):
-    """Perform a GET with UA rotation, proxy rotation, and rate‑limit delay."""
-    headers = {
-        "User-Agent": get_user_agent(),
-        "Accept": "application/json"
-    }
+    headers = {"User-Agent": get_user_agent(), "Accept": "application/json"}
     cookies = get_cookie()
     time.sleep(RATE_LIMIT_DELAY)
     sess = get_proxy_session()
     resp = sess.get(url, headers=headers, cookies=cookies, timeout=20)
-    resp.raise_for_status()
+    if not resp.ok:
+        print(f"  ! HTTP {resp.status_code} for URL: {url}")
+        resp.raise_for_status()
     return resp.json()
 
 # ─── Roblox Data Fetching ─────────────────────────────────────────────────────
 
 def fetch_user_games(uid):
-    """Fetch all games owned by a user via /v2/users/{uid}/games."""
     games, cursor = [], ""
     while True:
         url = (
-            f"https://games.roblox.com/v2/users/{uid}/games"
+            f"https://games.roblox.com/v1/users/{uid}/games"
             f"?accessFilter=All&limit=50&sortOrder=Asc&cursor={cursor}"
         )
         data = safe_get(url)
@@ -129,8 +114,22 @@ def fetch_user_games(uid):
             break
     return games
 
+def fetch_group_games(group_id):
+    games, cursor = [], ""
+    while True:
+        url = (
+            f"https://games.roblox.com/v1/groups/{group_id}/games"
+            f"?accessFilter=Public&limit=50&sortOrder=Asc&cursor={cursor}"
+        )
+        data = safe_get(url)
+        for g in data.get("data", []):
+            games.append({"id": str(g["id"]), "name": g["name"]})
+        cursor = data.get("nextPageCursor") or ""
+        if not cursor:
+            break
+    return games
+
 def fetch_game_metadata(ids):
-    """Batch fetch game metadata for a list of universeIds."""
     chunk = ",".join(ids)
     url = f"https://games.roblox.com/v1/games?universeIds={chunk}"
     data = safe_get(url)
@@ -139,33 +138,34 @@ def fetch_game_metadata(ids):
 # ─── Main Orchestration ───────────────────────────────────────────────────────
 
 def main():
-    # 1) Gather all game IDs from the target creators
+    # 1) Gather game IDs from users
     all_ids = set()
     for uid in CREATORS:
         print(f"> Fetching games for user {uid}")
         try:
             for g in fetch_user_games(uid):
                 all_ids.add(g["id"])
+            # Optionally fetch group games too:
+            # for gid in fetch_user_groups(uid): ...
         except Exception as e:
-            print(f"  ! Error fetching games for {uid}: {e}")
-        print(f"  → {len(all_ids)} total IDs so far")
+            print(f"  ! Error for {uid}: {e}")
+        print(f"  → {len(all_ids)} IDs so far")
 
     all_ids = list(all_ids)
-    print(f"\nTotal unique games to fetch metadata for: {len(all_ids)}\n")
+    print(f"\nTotal unique games: {len(all_ids)}\n")
 
-    # 2) Batch metadata fetch
+    # 2) Metadata batches
     rows = []
     for i in range(0, len(all_ids), BATCH_SIZE):
         batch = all_ids[i : i + BATCH_SIZE]
-        print(f"> Fetching metadata batch {i//BATCH_SIZE + 1} ({len(batch)} IDs)")
+        print(f"> Meta batch {i//BATCH_SIZE + 1} ({len(batch)} IDs)")
         try:
-            meta = fetch_game_metadata(batch)
-            for g in meta:
+            for g in fetch_game_metadata(batch):
                 rows.append({f: g.get(f) for f in FIELDS})
         except Exception as e:
-            print(f"  ! Error fetching metadata for batch {i//BATCH_SIZE + 1}: {e}")
+            print(f"  ! Batch error: {e}")
 
-    # 3) Save to CSV
+    # 3) Save CSV
     df = pd.DataFrame(rows)
     df.to_csv("test_data.csv", index=False)
     print(f"\n✅ Saved {len(df)} records to test_data.csv")
