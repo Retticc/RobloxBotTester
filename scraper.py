@@ -145,6 +145,36 @@ def safe_get(url, retries=3):
             if attempt == retries - 1:
                 raise
             time.sleep(2 ** attempt)  # Exponential backoff
+            
+def safe_post(url, json=None, retries=3):
+    """Perform a POST request with retries, backoff, proxy & token rotation."""
+    for attempt in range(retries):
+        # rate‑limit delay plus a bit of random jitter
+        time.sleep(RATE_LIMIT_DELAY + random.uniform(0, 0.3))
+        sess = get_session()
+        try:
+            resp = sess.post(
+                url,
+                headers={
+                    "User-Agent": get_user_agent(),
+                    "Accept": "application/json"
+                },
+                cookies=get_cookie(),
+                json=json,
+                timeout=30
+            )
+            if resp.ok:
+                return resp.json()
+            # log non-2xx status
+            print(f"[POST] HTTP {resp.status_code} @ {url} payload={json}")
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"[POST] attempt {attempt+1} error: {e}")
+            # exponential backoff before retrying
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+    # all retries failed
+    raise RuntimeError(f"POST failed after {retries} attempts: {url}")```
 
 # ─── Roblox API Functions ──────────────────────────────────────────────────────
 
