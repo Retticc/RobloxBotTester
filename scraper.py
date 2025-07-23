@@ -202,40 +202,46 @@ def fetch_group_games(group_id):
     return games
 
 def get_game_details(universe_ids):
-    out = []
-    # batch into safe GET chunks with retry‑split
-    def chunk_fetch(ids):
-        if not ids: return []
-        ids_str = ",".join(ids)
-        url = f"https://games.roblox.com/v1/games?universeIds={ids_str}"
-        try:
-            return safe_get(url).get("data",[])
-        except RuntimeError:
-            if len(ids)==1:
-                return []
-            m = len(ids)//2
-            return chunk_fetch(ids[:m]) + chunk_fetch(ids[m:])
+    """POST to /v1/games with JSON body {'universeIds': [...]}."""
+    details = []
+
+    def fetch_chunk(ids):
+        resp = safe_post(
+            "https://games.roblox.com/v1/games",
+            json={"universeIds": ids}
+        )
+        return resp.get("data", [])
+
     for i in range(0, len(universe_ids), BATCH_SIZE):
-        out.extend(chunk_fetch(universe_ids[i:i+BATCH_SIZE]))
-    return out
+        chunk = universe_ids[i : i + BATCH_SIZE]
+        try:
+            details.extend(fetch_chunk(chunk))
+        except Exception as e:
+            print(f"[Meta] chunk {i//BATCH_SIZE+1} failed: {e}")
+    return details
 
 def get_game_votes(universe_ids):
+    """POST to /v1/games/votes with JSON body {'universeIds': [...]}."""
     votes = {}
-    def chunk_votes(ids):
-        if not ids: return {}
-        ids_str = ",".join(ids)
-        url = f"https://games.roblox.com/v1/games/votes?universeIds={ids_str}"
-        try:
-            d = safe_get(url).get("data",[])
-            return {str(v["id"]):{"upVotes":v["upVotes"],"downVotes":v["downVotes"]} for v in d}
-        except RuntimeError:
-            if len(ids)==1:
-                return {}
-            m = len(ids)//2
-            a = chunk_votes(ids[:m]); b = chunk_votes(ids[m:])
-            a.update(b); return a
+
+    def fetch_chunk(ids):
+        resp = safe_post(
+            "https://games.roblox.com/v1/games/votes",
+            json={"universeIds": ids}
+        )
+        return resp.get("data", [])
+
     for i in range(0, len(universe_ids), BATCH_SIZE):
-        votes.update(chunk_votes(universe_ids[i:i+BATCH_SIZE]))
+        chunk = universe_ids[i : i + BATCH_SIZE]
+        try:
+            for v in fetch_chunk(chunk):
+                uid = str(v["id"])
+                votes[uid] = {
+                    "upVotes":   v.get("upVotes", 0),
+                    "downVotes": v.get("downVotes", 0),
+                }
+        except Exception as e:
+            print(f"[Votes] chunk {i//BATCH_SIZE+1} failed: {e}")
     return votes
 
 def fetch_icons(universe_ids):
