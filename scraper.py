@@ -171,29 +171,41 @@ def fetch_group_games(group_id):
     return games
 
 # ─── Roblox: metadata & votes ──────────────────────────────────────────────────
-def get_game_details(ids):
-    out = []
-    for i in range(0,len(ids),BATCH_SIZE):
-        chunk = ids[i:i+BATCH_SIZE]
+
+def get_game_details(universe_ids):
+    """Fetch metadata via GET /v1/games?universeIds=..."""
+    details = []
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        chunk = universe_ids[i : i + BATCH_SIZE]
+        ids = ",".join(chunk)
+        url = f"https://games.roblox.com/v1/games?universeIds={ids}"
         try:
-            data = safe_post("https://games.roblox.com/v1/games", json={"universeIds":chunk})
-            out.extend(data.get("data",[]))
+            data = safe_get(url)
+            details.extend(data.get("data", []))
         except Exception as e:
             print(f"[Meta] chunk {i//BATCH_SIZE+1} failed: {e}")
-    return out
+    return details
 
-def get_game_votes(ids):
+
+def get_game_votes(universe_ids):
+    """Fetch votes via GET /v1/games/votes?universeIds=..."""
     votes = {}
-    for i in range(0,len(ids),BATCH_SIZE):
-        chunk = ids[i:i+BATCH_SIZE]
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        chunk = universe_ids[i : i + BATCH_SIZE]
+        ids = ",".join(chunk)
+        url = f"https://games.roblox.com/v1/games/votes?universeIds={ids}"
         try:
-            data = safe_post("https://games.roblox.com/v1/games/votes", json={"universeIds":chunk})
-            for v in data.get("data",[]):
-                uid = str(v["id"])
-                votes[uid] = {"upVotes":v.get("upVotes",0),"downVotes":v.get("downVotes",0)}
+            data = safe_get(url)
+            for v in data.get("data", []):
+                uid = str(v.get("id", ""))
+                votes[uid] = {
+                    "upVotes":   v.get("upVotes", 0),
+                    "downVotes": v.get("downVotes", 0)
+                }
         except Exception as e:
             print(f"[Votes] chunk {i//BATCH_SIZE+1} failed: {e}")
     return votes
+
 
 # ─── Main Workflow ─────────────────────────────────────────────────────────────
 def main():
