@@ -201,58 +201,78 @@ def fetch_group_games(group_id):
             break
     return games
 
+# ─── Roblox Metadata & Votes (GET + recursive chunking) ────────────────────────
 def get_game_details(universe_ids):
-    """POST to /v1/games with JSON body {'universeIds': [...]}."""
-    details = []
-
+    """Fetch metadata via GET /v1/games?universeIds=… in batches and
+       fall back by splitting a batch in half on failure."""
     def fetch_chunk(ids):
-        resp = safe_post(
-            "https://games.roblox.com/v1/games",
-            json={"universeIds": ids}
-        )
-        return resp.get("data", [])
-
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        chunk = universe_ids[i : i + BATCH_SIZE]
+        ids_str = ",".join(ids)
+        url     = f"https://games.roblox.com/v1/games?universeIds={ids_str}"
         try:
-            details.extend(fetch_chunk(chunk))
-        except Exception as e:
-            print(f"[Meta] chunk {i//BATCH_SIZE+1} failed: {e}")
+            return safe_get(url).get("data", [])
+        except Exception:
+            if len(ids) == 1:
+                return []  # give up on this single universe
+            mid = len(ids) // 2
+            return fetch_chunk(ids[:mid]) + fetch_chunk(ids[mid:])
+
+    details = []
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        batch = universe_ids[i : i + BATCH_SIZE]
+        details.extend(fetch_chunk(batch))
     return details
 
 def get_game_votes(universe_ids):
-    """POST to /v1/games/votes with JSON body {'universeIds': [...]}."""
-    votes = {}
-
+    """Fetch votes via GET /v1/games/votes?universeIds=… in batches."""
     def fetch_chunk(ids):
-        resp = safe_post(
-            "https://games.roblox.com/v1/games/votes",
-            json={"universeIds": ids}
-        )
-        return resp.get("data", [])
-
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        chunk = universe_ids[i : i + BATCH_SIZE]
+        ids_str = ",".join(ids)
+        url     = f"https://games.roblox.com/v1/games/votes?universeIds={ids_str}"
         try:
-            for v in fetch_chunk(chunk):
-                uid = str(v["id"])
-                votes[uid] = {
-                    "upVotes":   v.get("upVotes", 0),
-                    "downVotes": v.get("downVotes", 0),
-                }
-        except Exception as e:
-            print(f"[Votes] chunk {i//BATCH_SIZE+1} failed: {e}")
+            data = safe_get(url).get("data", [])
+            return { str(v["id"]): {"upVotes": v["upVotes"], "downVotes": v["downVotes"]} 
+                     for v in data }
+        except Exception:
+            if len(ids) == 1:
+                return {}
+            mid = len(ids) // 2
+            a = fetch_chunk(ids[:mid])
+            b = fetch_chunk(ids[mid:])
+            a.update(b)
+            return a
+
+    votes = {}
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        batch = universe_ids[i : i + BATCH_SIZE]
+        votes.update(fetch_chunk(batch))
     return votes
 
+# ─── Chunked Thumbnails & Icons ───────────────────────────────────────────────
 def fetch_icons(universe_ids):
-    ids_str = ",".join(universe_ids)
-    url = f"https://thumbnails.roblox.com/v1/games/icons?universeIds={ids_str}&size=512x512&format=Png"
-    return {str(i["targetId"]):i["imageUrl"] for i in safe_get(url).get("data",[])}
+    icons = {}
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        batch = universe_ids[i : i + BATCH_SIZE]
+        qs    = ",".join(batch)
+        url   = (
+            "https://thumbnails.roblox.com/v1/games/icons"
+            f"?universeIds={qs}&size=512x512&format=Png"
+        )
+        for entry in safe_get(url).get("data", []):
+            icons[str(entry["targetId"])] = entry["imageUrl"]
+    return icons
 
 def fetch_thumbnails(universe_ids):
-    ids_str = ",".join(universe_ids)
-    url = f"https://thumbnails.roblox.com/v1/games/thumbnails?universeIds={ids_str}&size=768x432&format=Png"
-    return {str(i["targetId"]):i["imageUrl"] for i in safe_get(url).get("data",[])}
+    thumbs = {}
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        batch = universe_ids[i : i + BATCH_SIZE]
+        qs    = ",".join(batch)
+        url   = (
+            "https://thumbnails.roblox.com/v1/games/thumbnails"
+            f"?universeIds={qs}&size=768x432&format=Png"
+        )
+        for entry in safe_get(url).get("data", []):
+            thumbs[str(entry["targetId"])] = entry["imageUrl"]
+    return thumbs
+
 
 # ─── Core scrape + snapshot + prune ────────────────────────────────────────────
 def scrape_and_snapshot():
