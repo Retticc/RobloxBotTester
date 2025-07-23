@@ -301,6 +301,7 @@ def get_game_votes(universe_ids):
     return votes
 
 # ─── Chunked Thumbnails & Icons ───────────────────────────────────────────────
+
 from requests.exceptions import HTTPError
 
 def fetch_icons(universe_ids):
@@ -318,8 +319,8 @@ def fetch_icons(universe_ids):
                 icons[str(entry["targetId"])] = entry["imageUrl"]
         except HTTPError as e:
             print(f"[Icons] batch {i//BATCH_SIZE+1} failed: {e}")
-            # If you want to split that batch and retry smaller chunks:
             if len(batch) > 1:
+                # split and retry smaller chunks
                 mid = len(batch)//2
                 icons.update(fetch_icons(batch[:mid]))
                 icons.update(fetch_icons(batch[mid:]))
@@ -345,7 +346,6 @@ def fetch_thumbnails(universe_ids):
                 thumbs.update(fetch_thumbnails(batch[:mid]))
                 thumbs.update(fetch_thumbnails(batch[mid:]))
     return thumbs
-
 
 
 # ─── Core scrape + snapshot + prune ────────────────────────────────────────────
