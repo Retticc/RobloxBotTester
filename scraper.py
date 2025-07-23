@@ -10,18 +10,15 @@ load_dotenv()
 # ─── Configuration ─────────────────────────────────────────────────────────────
 CREATORS         = [u.strip() for u in os.getenv("TARGET_CREATORS", "").split(",") if u.strip()]
 TOKENS           = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS", "").split(",") if t.strip()]
-# Roblox API caps 100 IDs per metadata/votes call
 MAX_IDS_PER_REQ  = 100
 env_batch        = int(os.getenv("BATCH_SIZE", "100"))
 BATCH_SIZE       = max(1, min(env_batch, MAX_IDS_PER_REQ))
 RATE_LIMIT_DELAY = float(os.getenv("RATE_LIMIT_DELAY", "0.7"))
 
-# Proxy service settings
 PROXY_API_KEY       = os.getenv("PROXY_API_KEY", "")
 PROXY_API_BASE      = os.getenv("PROXY_API_BASE", "https://proxy-ipv4.com/client-api/v1")
 PROXY_URLS_FALLBACK = [p.strip() for p in os.getenv("PROXY_URLS", "").split(",") if p.strip()]
 
-# CSV fields
 FIELDS = [
     "universeId","name","playing","visits",
     "favorites","likeCount","dislikeCount",
@@ -40,24 +37,20 @@ def fetch_proxies_from_api():
         print(f"[ProxyAPI] error: {e}")
         return []
     proxies = []
-    # IPv4
-    for e in data.get("ipv4", []):
-        ip, auth = e["ip"], e["authInfo"]
+    for entry in data.get("ipv4", []):
+        ip, auth = entry["ip"], entry["authInfo"]
         for port_key, scheme in (("httpsPort","http"),("socks5Port","socks5")):
-            if port := e.get(port_key):
+            if port := entry.get(port_key):
                 proxies.append(f"{scheme}://{auth['login']}:{auth['password']}@{ip}:{port}")
-    # IPv6
     for order in data.get("ipv6", []):
         for ipinfo in order.get("ips", []):
-            proto = ipinfo["protocol"].lower()
-            ipport, auth = ipinfo["ip"], ipinfo["authInfo"]
+            proto, ipport, auth = ipinfo["protocol"].lower(), ipinfo["ip"], ipinfo["authInfo"]
             proxies.append(f"{proto}://{auth['login']}:{auth['password']}@{ipport}")
-    # ISP & Mobile
     for key in ("isp","mobile"):
-        for e in data.get(key, []):
-            ip, auth = e["ip"], e["authInfo"]
+        for entry in data.get(key, []):
+            ip, auth = entry["ip"], entry["authInfo"]
             for port_key, scheme in (("httpsPort","http"),("socks5Port","socks5")):
-                if port := e.get(port_key):
+                if port := entry.get(port_key):
                     proxies.append(f"{scheme}://{auth['login']}:{auth['password']}@{ip}:{port}")
     return proxies
 
@@ -77,9 +70,9 @@ def get_cookie():
 
 def get_user_agent():
     return random.choice([
-        "Mozilla/5.0 (Windows NT 10; Win64; x64)…",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)…",
-        "Mozilla/5.0 (X11; Linux x86_64)…"
+        "Mozilla/5.0 (Windows NT 10; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     ])
 
 def get_session():
@@ -132,11 +125,8 @@ def safe_post(url, json=None, retries=3):
                 time.sleep(2**i)
     raise RuntimeError(f"POST failed after {retries} attempts: {url}")
 
-# ─── Roblox API – Fetch a creator’s own games ──────────────────────────────────
+# ─── Roblox API – Creator’s Own Universes ─────────────────────────────────────
 def fetch_creator_games(user_id):
-    """
-    POST to /v1/universes/list to list every universe that this user has created.
-    """
     games, cursor = [], ""
     url = "https://games.roblox.com/v1/universes/list"
     while True:
@@ -148,33 +138,33 @@ def fetch_creator_games(user_id):
                 "cursor":      cursor
             }
         }
-        data = safe_post(url, json=payload)
+        try:
+            data = safe_post(url, json=payload)
+        except Exception as e:
+            print(f"[UniversesList-User] failed for {user_id}: {e}")
+            return games
         for uni in data.get("universes", []):
             games.append({
                 "universeId": str(uni.get("id") or uni.get("universeId")),
-                "name":       uni.get("name", "")
+                "name":       uni.get("name","")
             })
-        cursor = data.get("nextPageCursor", "")
+        cursor = data.get("nextPageCursor","")
         if not cursor:
             break
     return games
 
-
-# ─── Roblox API – Fetch the groups a user belongs to ─────────────────────────
+# ─── Roblox API – User’s Groups ───────────────────────────────────────────────
 def fetch_user_groups(user_id):
     url = f"https://groups.roblox.com/v2/users/{user_id}/groups/roles"
     try:
         data = safe_get(url)
-        return [str(g["group"]["id"]) for g in data.get("data", [])]
+        return [str(g["group"]["id"]) for g in data.get("data", []) if "group" in g]
     except Exception as e:
         print(f"[UserGroups] failed for {user_id}: {e}")
         return []
 
-# ─── Roblox API – Fetch games owned by a group ───────────────────────────────
+# ─── Roblox API – Group’s Universes ───────────────────────────────────────────
 def fetch_group_games(group_id):
-    """
-    POST to /v1/universes/list to list every universe that this group owns.
-    """
     games, cursor = [], ""
     url = "https://games.roblox.com/v1/universes/list"
     while True:
@@ -186,40 +176,48 @@ def fetch_group_games(group_id):
                 "cursor":      cursor
             }
         }
-        data = safe_post(url, json=payload)
+        try:
+            data = safe_post(url, json=payload)
+        except Exception as e:
+            print(f"[UniversesList-Group] failed for {group_id}: {e}")
+            return games
         for uni in data.get("universes", []):
             games.append({
                 "universeId": str(uni.get("id") or uni.get("universeId")),
-                "name":       uni.get("name", "")
+                "name":       uni.get("name","")
             })
-        cursor = data.get("nextPageCursor", "")
+        cursor = data.get("nextPageCursor","")
         if not cursor:
             break
     return games
 
 # ─── Roblox API – Metadata & Votes ────────────────────────────────────────────
-def get_game_details(ids):
+def get_game_details(universe_ids):
     details = []
-    for i in range(0, len(ids), BATCH_SIZE):
-        chunk = ids[i:i+BATCH_SIZE]
-        url   = f"https://games.roblox.com/v1/games?universeIds={','.join(chunk)}"
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        chunk = universe_ids[i:i+BATCH_SIZE]
         try:
-            data = safe_get(url)
+            data = safe_post(
+                "https://games.roblox.com/v1/games",
+                json={"universeIds": chunk}
+            )
             details.extend(data.get("data", []))
         except Exception as e:
             print(f"[Meta] chunk {i//BATCH_SIZE+1} failed: {e}")
     return details
 
-def get_game_votes(ids):
+def get_game_votes(universe_ids):
     votes = {}
-    for i in range(0, len(ids), BATCH_SIZE):
-        chunk = ids[i:i+BATCH_SIZE]
-        url   = f"https://games.roblox.com/v1/games/votes?universeIds={','.join(chunk)}"
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        chunk = universe_ids[i:i+BATCH_SIZE]
         try:
-            data = safe_get(url)
+            data = safe_post(
+                "https://games.roblox.com/v1/games/votes",
+                json={"universeIds": chunk}
+            )
             for v in data.get("data", []):
-                uid = str(v["id"])
-                votes[uid] = {"upVotes":v.get("upVotes",0),"downVotes":v.get("downVotes",0)}
+                uid = str(v.get("id",""))
+                votes[uid] = {"upVotes": v.get("upVotes",0), "downVotes": v.get("downVotes",0)}
         except Exception as e:
             print(f"[Votes] chunk {i//BATCH_SIZE+1} failed: {e}")
     return votes
@@ -231,29 +229,31 @@ def main():
 
     for uid in CREATORS:
         print(f"> Creator {uid}")
-        # 1) Their own games
+
         own = fetch_creator_games(uid)
-        print(f"  → {len(own)} personal games")
-        # 2) Their groups
+        print(f"  → {len(own)} personal universes")
+
         gids = fetch_user_groups(uid)
         print(f"  → {len(gids)} groups")
+
         grp_games = []
         for gid in gids:
-            gg = fetch_group_games(gid)
-            print(f"    • Group {gid}: {len(gg)} games")
-            grp_games.extend(gg)
-        # combine & dedupe
+            gms = fetch_group_games(gid)
+            print(f"    • Group {gid}: {len(gms)} universes")
+            grp_games.extend(gms)
+
         for g in own + grp_games:
             all_ids.add(g["universeId"])
-        print(f"  → Total unique games so far: {len(all_ids)}")
+        print(f"  → Total unique universes so far: {len(all_ids)}")
 
     all_list = list(all_ids)
     if not all_list:
-        print("No games found; exiting.")
+        print("No universes found; exiting.")
         return
 
     print("\n> Fetching metadata…")
     meta  = get_game_details(all_list)
+
     print("> Fetching votes…")
     votes = get_game_votes(all_list)
 
@@ -280,6 +280,7 @@ def main():
 
     print("\nPreview of test_data.csv:")
     print(df.head(10).to_string(index=False))
+
 
 if __name__ == "__main__":
     main()
