@@ -22,7 +22,7 @@ POLL_INTERVAL      = 30 * 60  # seconds
 
 # ─── Database Helpers ──────────────────────────────────────────────────────────
 def get_conn():
-    return psycopg2.connect(DATABASE_URL)
+     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def ensure_tables():
     ddl = """
