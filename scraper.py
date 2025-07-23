@@ -135,40 +135,94 @@ def get_session():
         s.proxies.update({"http":p,"https":p})
     return s
 
+from socks import ProxyConnectionError
+from requests.exceptions import ConnectionError as ReqConnError
+
 def safe_get(url, retries=3):
-    for i in range(retries):
-        time.sleep(RATE_LIMIT_DELAY + random.random()*0.3)
+    last_err = None
+
+    for attempt in range(retries):
+        time.sleep(RATE_LIMIT_DELAY + random.random() * 0.3)
         sess = get_session()
+        proxy = sess.proxies.get("https") or sess.proxies.get("http")
+
         try:
-            r = sess.get(url,
-                         headers={"User-Agent":get_user_agent(),"Accept":"application/json"},
-                         cookies=get_cookie(), timeout=30)
+            r = sess.get(
+                url,
+                headers={"User-Agent": get_user_agent(), "Accept": "application/json"},
+                cookies=get_cookie(),
+                timeout=30
+            )
             if r.ok:
                 return r.json()
             r.raise_for_status()
+
+        except (ProxyConnectionError, ReqConnError) as e:
+            last_err = e
+            # if it was a proxy we just tried, drop it
+            if proxy in PROXIES:
+                print(f"[proxy] removing dead proxy {proxy}")
+                PROXIES.remove(proxy)
+            # if we still have proxies, retry immediately
+            if PROXIES:
+                continue
+            # otherwise fall through to retry without proxy
+            print("[proxy] no proxies left, trying direct connection")
+            sess.proxies.clear()
+            continue
+
         except Exception as e:
-            if i==retries-1:
-                raise
-            time.sleep(2**i)
-    raise RuntimeError(f"GET failed: {url}")
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
+    # if we get here, everything failed
+    raise RuntimeError(f"GET failed after {retries} attempts: {url}\nLast error: {last_err}")
+
+
+from socks import ProxyConnectionError
+from requests.exceptions import ConnectionError as ReqConnError
 
 def safe_post(url, json=None, retries=3):
-    headers = {"User-Agent":get_user_agent(),
-               "Accept":"application/json",
-               "Content-Type":"application/json"}
-    for i in range(retries):
-        time.sleep(RATE_LIMIT_DELAY + random.random()*0.3)
+    headers = {
+        "User‑Agent": get_user_agent(),
+        "Accept":      "application/json",
+        "Content-Type":"application/json"
+    }
+    last_err = None
+
+    for attempt in range(retries):
+        time.sleep(RATE_LIMIT_DELAY + random.random() * 0.3)
         sess = get_session()
+        proxy = sess.proxies.get("https") or sess.proxies.get("http")
+
         try:
             r = sess.post(url, headers=headers, cookies=get_cookie(), json=json, timeout=30)
             if r.ok:
                 return r.json()
             r.raise_for_status()
-        except Exception:
-            if i==retries-1:
-                raise
-            time.sleep(2**i)
-    raise RuntimeError(f"POST failed: {url}")
+
+        except (ProxyConnectionError, ReqConnError) as e:
+            last_err = e
+            if proxy in PROXIES:
+                print(f"[proxy] removing dead proxy {proxy}")
+                PROXIES.remove(proxy)
+            if PROXIES:
+                continue
+            print("[proxy] no proxies left, trying direct")
+            sess.proxies.clear()
+            continue
+
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
+    raise RuntimeError(f"POST failed after {retries} attempts: {url}\nLast error: {last_err}")
 
 # ─── Roblox endpoints ─────────────────────────────────────────────────────────
 def fetch_creator_games(user_id):
