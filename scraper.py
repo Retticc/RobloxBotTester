@@ -97,26 +97,26 @@ def safe_get(url, retries=3):
     raise RuntimeError(f"GET failed: {url}")
 
 def safe_post(url, json=None, retries=3):
+    headers = {
+        "User-Agent": get_user_agent(),
+        "Accept": "application/json",
+        "Content-Type": "application/json"       # ← add this
+    }
     for i in range(retries):
         time.sleep(RATE_LIMIT_DELAY + random.random()*0.3)
         sess = get_session()
         try:
-            r = sess.post(
-                url,
-                headers={"User-Agent":get_user_agent(),"Accept":"application/json"},
-                cookies=get_cookie(),
-                json=json,
-                timeout=30
-            )
+            r = sess.post(url, headers=headers, cookies=get_cookie(), json=json, timeout=30)
             if r.ok:
                 return r.json()
-            print(f"[POST] {r.status_code} @ {url}")
+            print(f"[POST] HTTP {r.status_code} @ {url}")
             r.raise_for_status()
         except Exception as e:
             print(f"[POST] attempt {i+1} error: {e}")
-            if i < retries-1:
+            if i < retries - 1:
                 time.sleep(2**i)
-    raise RuntimeError(f"POST failed: {url}")
+    raise RuntimeError(f"POST failed after {retries} attempts: {url}")
+
 
 # ─── Roblox: a user’s own games ────────────────────────────────────────────────
 def fetch_creator_games(user_id):
@@ -173,38 +173,49 @@ def fetch_group_games(group_id):
 # ─── Roblox: metadata & votes ──────────────────────────────────────────────────
 
 def get_game_details(universe_ids):
-    """Fetch metadata via GET /v1/games?universeIds=..."""
+    def fetch_chunk(ids):
+        ids_str = ",".join(ids)
+        url = f"https://games.roblox.com/v1/games?universeIds={ids_str}"
+        try:
+            return safe_get(url).get("data", [])
+        except RuntimeError as e:
+            if len(ids) == 1:
+                # skip this single universeId if it truly fails
+                return []
+            # split in half and retry
+            mid = len(ids) // 2
+            return fetch_chunk(ids[:mid]) + fetch_chunk(ids[mid:])
+
     details = []
     for i in range(0, len(universe_ids), BATCH_SIZE):
         chunk = universe_ids[i : i + BATCH_SIZE]
-        ids = ",".join(chunk)
-        url = f"https://games.roblox.com/v1/games?universeIds={ids}"
-        try:
-            data = safe_get(url)
-            details.extend(data.get("data", []))
-        except Exception as e:
-            print(f"[Meta] chunk {i//BATCH_SIZE+1} failed: {e}")
+        details.extend(fetch_chunk(chunk))
     return details
 
 
+
 def get_game_votes(universe_ids):
-    """Fetch votes via GET /v1/games/votes?universeIds=..."""
+    def fetch_chunk(ids):
+        ids_str = ",".join(ids)
+        url = f"https://games.roblox.com/v1/games/votes?universeIds={ids_str}"
+        try:
+            data = safe_get(url).get("data", [])
+            return { str(v["id"]): {"upVotes":v["upVotes"],"downVotes":v["downVotes"]} for v in data }
+        except RuntimeError:
+            if len(ids) == 1:
+                return {}
+            mid = len(ids) // 2
+            a = fetch_chunk(ids[:mid])
+            b = fetch_chunk(ids[mid:])
+            a.update(b)
+            return a
+
     votes = {}
     for i in range(0, len(universe_ids), BATCH_SIZE):
         chunk = universe_ids[i : i + BATCH_SIZE]
-        ids = ",".join(chunk)
-        url = f"https://games.roblox.com/v1/games/votes?universeIds={ids}"
-        try:
-            data = safe_get(url)
-            for v in data.get("data", []):
-                uid = str(v.get("id", ""))
-                votes[uid] = {
-                    "upVotes":   v.get("upVotes", 0),
-                    "downVotes": v.get("downVotes", 0)
-                }
-        except Exception as e:
-            print(f"[Votes] chunk {i//BATCH_SIZE+1} failed: {e}")
+        votes.update(fetch_chunk(chunk))
     return votes
+
 
 
 # ─── Main Workflow ─────────────────────────────────────────────────────────────
