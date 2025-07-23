@@ -301,6 +301,8 @@ def get_game_votes(universe_ids):
     return votes
 
 # ─── Chunked Thumbnails & Icons ───────────────────────────────────────────────
+from requests.exceptions import HTTPError
+
 def fetch_icons(universe_ids):
     icons = {}
     for i in range(0, len(universe_ids), BATCH_SIZE):
@@ -310,8 +312,17 @@ def fetch_icons(universe_ids):
             "https://thumbnails.roblox.com/v1/games/icons"
             f"?universeIds={qs}&size=512x512&format=Png"
         )
-        for entry in safe_get(url).get("data", []):
-            icons[str(entry["targetId"])] = entry["imageUrl"]
+        try:
+            data = safe_get(url).get("data", [])
+            for entry in data:
+                icons[str(entry["targetId"])] = entry["imageUrl"]
+        except HTTPError as e:
+            print(f"[Icons] batch {i//BATCH_SIZE+1} failed: {e}")
+            # If you want to split that batch and retry smaller chunks:
+            if len(batch) > 1:
+                mid = len(batch)//2
+                icons.update(fetch_icons(batch[:mid]))
+                icons.update(fetch_icons(batch[mid:]))
     return icons
 
 def fetch_thumbnails(universe_ids):
@@ -323,9 +334,18 @@ def fetch_thumbnails(universe_ids):
             "https://thumbnails.roblox.com/v1/games/thumbnails"
             f"?universeIds={qs}&size=768x432&format=Png"
         )
-        for entry in safe_get(url).get("data", []):
-            thumbs[str(entry["targetId"])] = entry["imageUrl"]
+        try:
+            data = safe_get(url).get("data", [])
+            for entry in data:
+                thumbs[str(entry["targetId"])] = entry["imageUrl"]
+        except HTTPError as e:
+            print(f"[Thumbnails] batch {i//BATCH_SIZE+1} failed: {e}")
+            if len(batch) > 1:
+                mid = len(batch)//2
+                thumbs.update(fetch_thumbnails(batch[:mid]))
+                thumbs.update(fetch_thumbnails(batch[mid:]))
     return thumbs
+
 
 
 # ─── Core scrape + snapshot + prune ────────────────────────────────────────────
