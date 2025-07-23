@@ -134,24 +134,31 @@ def safe_post(url, json=None, retries=3):
 
 # ─── Roblox API – Fetch a creator’s own games ──────────────────────────────────
 def fetch_creator_games(user_id):
+    """
+    POST to /v1/universes/list to list every universe that this user has created.
+    """
     games, cursor = [], ""
-    base = f"https://games.roblox.com/v2/users/{user_id}/games"
+    url = "https://games.roblox.com/v1/universes/list"
     while True:
-        params = {"accessFilter":"Public","sortOrder":"Asc","limit":50}
-        if cursor:
-            params["cursor"] = cursor
-        query = "&".join(f"{k}={v}" for k,v in params.items())
-        try:
-            data = safe_get(f"{base}?{query}")
-        except Exception as e:
-            print(f"[UserGames] failed for {user_id}: {e}")
-            return games
-        for item in data.get("data", []):
-            games.append({"universeId": str(item["id"]), "name": item.get("name","")})
-        cursor = data.get("nextPageCursor","")
+        payload = {
+            "model": {
+                "creatorType": "User",
+                "creatorId":   int(user_id),
+                "limit":       50,
+                "cursor":      cursor
+            }
+        }
+        data = safe_post(url, json=payload)
+        for uni in data.get("universes", []):
+            games.append({
+                "universeId": str(uni.get("id") or uni.get("universeId")),
+                "name":       uni.get("name", "")
+            })
+        cursor = data.get("nextPageCursor", "")
         if not cursor:
             break
     return games
+
 
 # ─── Roblox API – Fetch the groups a user belongs to ─────────────────────────
 def fetch_user_groups(user_id):
@@ -165,21 +172,27 @@ def fetch_user_groups(user_id):
 
 # ─── Roblox API – Fetch games owned by a group ───────────────────────────────
 def fetch_group_games(group_id):
+    """
+    POST to /v1/universes/list to list every universe that this group owns.
+    """
     games, cursor = [], ""
-    base = f"https://games.roblox.com/v2/groups/{group_id}/games"
+    url = "https://games.roblox.com/v1/universes/list"
     while True:
-        params = {"accessFilter":"Public","sortOrder":"Asc","limit":50}
-        if cursor:
-            params["cursor"] = cursor
-        query = "&".join(f"{k}={v}" for k,v in params.items())
-        try:
-            data = safe_get(f"{base}?{query}")
-        except Exception as e:
-            print(f"[GroupGames] failed for {group_id}: {e}")
-            return games
-        for item in data.get("data", []):
-            games.append({"universeId": str(item["id"]), "name": item.get("name","")})
-        cursor = data.get("nextPageCursor","")
+        payload = {
+            "model": {
+                "creatorType": "Group",
+                "creatorId":   int(group_id),
+                "limit":       50,
+                "cursor":      cursor
+            }
+        }
+        data = safe_post(url, json=payload)
+        for uni in data.get("universes", []):
+            games.append({
+                "universeId": str(uni.get("id") or uni.get("universeId")),
+                "name":       uni.get("name", "")
+            })
+        cursor = data.get("nextPageCursor", "")
         if not cursor:
             break
     return games
