@@ -18,7 +18,6 @@ RATE_LIMIT_DELAY = float(os.getenv("RATE_LIMIT_DELAY","0.7"))
 PROXY_API_KEY       = os.getenv("PROXY_API_KEY","")
 PROXY_API_BASE      = os.getenv("PROXY_API_BASE","https://proxy-ipv4.com/client-api/v1")
 PROXY_URLS_FALLBACK = [p.strip() for p in os.getenv("PROXY_URLS","").split(",") if p.strip()]
-POLL_INTERVAL      = 30 * 60  # seconds
 
 # ─── Database Helpers ──────────────────────────────────────────────────────────
 def get_conn():
@@ -299,14 +298,7 @@ def scrape_and_snapshot():
     print(f"🕒 {len(all_list)} games snapped at {datetime.utcnow()}")
 
 def main():
-    ensure_tables()
-    print("Starting 30‑minute scrape loop…")
-    while True:
-        try:
-            scrape_and_snapshot()
-        except Exception as err:
-            print("!!! scrape error:", err)
-        time.sleep(POLL_INTERVAL)
+    scrape_and_snapshot()
 
 if __name__=="__main__":
     main()
