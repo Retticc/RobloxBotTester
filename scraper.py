@@ -48,21 +48,19 @@ def ensure_tables():
             conn.commit()
 
 def upsert_games(games):
-    """games = list of (id,name)"""
-    # dedupe by id
     seen = set()
-    deduped = []
+    dedup = []
     for gid, name in games:
         if gid not in seen:
             seen.add(gid)
-            deduped.append((gid, name))
+            dedup.append((gid, name))
     sql = """
       INSERT INTO games(id,name) VALUES %s
       ON CONFLICT(id) DO UPDATE SET name = EXCLUDED.name
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            execute_values(cur, sql, deduped)
+            execute_values(cur, sql, dedup)
             conn.commit()
 
 def save_snapshots(snaps):
@@ -240,8 +238,8 @@ def get_game_details(universe_ids):
             return safe_get(url).get("data",[])
         except:
             if len(ids)==1: return []
-            mid=len(ids)//2
-            return fetch_chunk(ids[:mid])+fetch_chunk(ids[mid:])
+            mid = len(ids)//2
+            return fetch_chunk(ids[:mid]) + fetch_chunk(ids[mid:])
     out=[]
     for i in range(0,len(universe_ids),BATCH_SIZE):
         out+=fetch_chunk(universe_ids[i:i+BATCH_SIZE])
@@ -256,21 +254,21 @@ def get_game_votes(universe_ids):
             return {str(v["id"]):{"upVotes":v["upVotes"],"downVotes":v["downVotes"]} for v in data}
         except:
             if len(ids)==1: return {}
-            mid=len(ids)//2
-            a=fetch_chunk(ids[:mid]); b=fetch_chunk(ids[mid:])
+            mid = len(ids)//2
+            a = fetch_chunk(ids[:mid]); b = fetch_chunk(ids[mid:])
             a.update(b); return a
     votes={}
     for i in range(0,len(universe_ids),BATCH_SIZE):
         votes.update(fetch_chunk(universe_ids[i:i+BATCH_SIZE]))
     return votes
 
-# ─── Fetch icons & thumbnails via API, fallback to redirect URL ──────────────
+# ─── Icons & thumbnails ───────────────────────────────────────────────────────
 def fetch_icons(universe_ids):
-    icons={}
+    icons = {}
     for i in range(0,len(universe_ids),BATCH_SIZE):
-        batch=universe_ids[i:i+BATCH_SIZE]
-        qs=",".join(batch)
-        url=f"https://thumbnails.roblox.com/v1/games/icons?universeIds={qs}&size=512x512&format=Png"
+        batch = universe_ids[i:i+BATCH_SIZE]
+        qs    = ",".join(batch)
+        url   = f"https://thumbnails.roblox.com/v1/games/icons?universeIds={qs}&size=512x512&format=Png"
         try:
             for e in safe_get(url).get("data",[]):
                 icons[str(e["targetId"])] = e["imageUrl"]
@@ -278,66 +276,74 @@ def fetch_icons(universe_ids):
             pass
     return icons
 
-def fetch_thumbnails(universe_ids):
-    thumbs={}
-    meta_map = { str(g["universeId"]):g for g in meta_all }  # filled in main
+def fetch_thumbnails(universe_ids, meta_map):
+    thumbs = {}
     for i in range(0,len(universe_ids),BATCH_SIZE):
-        batch=universe_ids[i:i+BATCH_SIZE]
-        qs=",".join(batch)
-        url=f"https://thumbnails.roblox.com/v1/games/thumbnails?universeIds={qs}&size=768x432&format=Png"
+        batch = universe_ids[i:i+BATCH_SIZE]
+        qs    = ",".join(batch)
+        url   = f"https://thumbnails.roblox.com/v1/games/thumbnails?universeIds={qs}&size=768x432&format=Png"
         try:
             for e in safe_get(url).get("data",[]):
-                gid=str(e["targetId"])
-                thumbs[gid]=e["imageUrl"]
+                gid = str(e["targetId"])
+                thumbs[gid] = e["imageUrl"]
                 print(f"[Thumbnails] ✅ got {gid}")
         except:
-            # fallback per-ID
+            # fallback per-ID via asset-thumbnail-redirect
             for gid in batch:
+                root = meta_map[gid].get("rootPlaceId") or gid
+                redirect = (
+                  f"https://www.roblox.com/asset-thumbnail-redirect?"
+                  f"assetId={root}&width=768&height=432&format=png"
+                )
                 try:
-                    # redirect URL endpoint:
-                    thumb_url = (
-                      f"https://www.roblox.com/asset-thumbnail-redirect?"
-                      f"assetId={meta_map[gid]['rootPlaceId'] or gid}"
-                      f"&width=768&height=432&format=png"
-                    )
-                    r = requests.get(thumb_url, timeout=10)
+                    r = requests.get(redirect, timeout=10)
                     if r.ok:
-                        # save locally
                         os.makedirs("thumbnails", exist_ok=True)
                         fn = f"thumbnails/{gid}.png"
                         with open(fn,"wb") as f: f.write(r.content)
-                        thumbs[gid]=fn
+                        thumbs[gid] = fn
                         print(f"[Thumbnails] ⚙️ downloaded fallback for {gid}")
                 except:
                     print(f"[Thumbnails] ✖ skipping {gid}")
     return thumbs
 
-# ─── Main scrape+snapshot ─────────────────────────────────────────────────────
+# ─── Main scraper ─────────────────────────────────────────────────────────────
 def scrape_and_snapshot():
-    global meta_all
-    all_ids=set(); master=[]
+    all_ids = set()
+    master  = []
+
     for uid in CREATORS:
-        own=fetch_creator_games(uid)
-        grps=fetch_user_groups(uid)
-        grp=[]
-        for g in grps:
-            grp+=fetch_group_games(g)
+        own    = fetch_creator_games(uid)
+        groups = fetch_user_groups(uid)
+        grp    = []
+        for g in groups:
+            grp += fetch_group_games(g)
         for g in own+grp:
             all_ids.add(g["universeId"])
             master.append((int(g["universeId"]), g["name"]))
+
     if not all_ids:
-        print("No games found") ; return
-    all_list=list(all_ids)
-    meta_all=get_game_details(all_list)
-    votes   =get_game_votes(all_list)
-    icons   =fetch_icons(all_list)
-    thumbs  =fetch_thumbnails(all_list)
+        print("No games found; exiting.")
+        return
+
+    all_list = list(all_ids)
+    meta_all = get_game_details(all_list)
+    votes    = get_game_votes(all_list)
+    icons    = fetch_icons(all_list)
+
+    # build a map from universeId→metadata (falls back to 'id')
+    meta_map = {
+      str(g.get("universeId") or g.get("id")): g
+      for g in meta_all
+    }
+
+    thumbs = fetch_thumbnails(all_list, meta_map)
 
     upsert_games(master)
 
-    snaps=[]
+    snaps = []
     for g in meta_all:
-        uid=str(g.get("universeId") or g.get("id"))
+        uid = str(g.get("universeId") or g.get("id"))
         snaps.append((
             int(uid),
             g.get("playing",0),
@@ -350,6 +356,7 @@ def scrape_and_snapshot():
         ))
     save_snapshots(snaps)
     prune_stale([int(x) for x in all_list])
+
     print(f"🕒 {len(all_list)} games snapped at {datetime.utcnow()}")
 
 def main():
