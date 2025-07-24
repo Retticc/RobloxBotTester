@@ -339,24 +339,34 @@ def fetch_icons(universe_ids):
     return icons
 
 def fetch_thumbnails(universe_ids):
+    """Fetch thumbnails in BATCH_SIZE chunks, splitting on failure to skip only the bad IDs."""
     thumbs = {}
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        batch = universe_ids[i : i + BATCH_SIZE]
-        qs    = ",".join(batch)
-        url   = (
+
+    def fetch_chunk(ids):
+        qs  = ",".join(ids)
+        url = (
             "https://thumbnails.roblox.com/v1/games/thumbnails"
             f"?universeIds={qs}&size=768x432&format=Png"
         )
         try:
             data = safe_get(url).get("data", [])
-            for entry in data:
-                thumbs[str(entry["targetId"])] = entry["imageUrl"]
-        except HTTPError as e:
-            print(f"[Thumbnails] batch {i//BATCH_SIZE+1} failed: {e}")
-            if len(batch) > 1:
-                mid = len(batch)//2
-                thumbs.update(fetch_thumbnails(batch[:mid]))
-                thumbs.update(fetch_thumbnails(batch[mid:]))
+            return { str(e["targetId"]): e["imageUrl"] for e in data }
+        except Exception as e:
+            # if it's just one ID, give up on it
+            if len(ids) == 1:
+                print(f"[Thumbnails] skipping {ids[0]} (no thumbnail): {e}")
+                return {}
+            # otherwise split and retry
+            mid = len(ids) // 2
+            left  = fetch_chunk(ids[:mid])
+            right = fetch_chunk(ids[mid:])
+            left.update(right)
+            return left
+
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        batch = universe_ids[i : i + BATCH_SIZE]
+        thumbs.update(fetch_chunk(batch))
+
     return thumbs
 
 
