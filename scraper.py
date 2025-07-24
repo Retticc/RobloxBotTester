@@ -9,6 +9,9 @@ from dotenv import load_dotenv
 from psycopg2.extras import execute_values
 from socks import ProxyConnectionError
 from requests.exceptions import ConnectionError as ReqConnError, HTTPError
+import os
+from requests.exceptions import HTTPError
+
 
 load_dotenv()
 
@@ -311,25 +314,29 @@ def fetch_icons(universe_ids):
             print(f"[fetch_icons]   HTTPError, skipping batch: {e!r}")
     return icons
 
+
 def fetch_thumbnails(universe_ids):
-    """
-    For each universeId, build the direct image URL:
-    https://www.roblox.com/asset-thumbnail/image?assetId={id}&width=768&height=432&format=png
-    """
-    print(f"[fetch_thumbnails] total IDs={len(universe_ids)}")
+    print(f"[fetch_thumbnails] total IDs={len(universe_ids)}, batches of {BATCH_SIZE}")
     thumbs = {}
     os.makedirs("thumbnails", exist_ok=True)
 
-    for uid in universe_ids:
-        url = (
-            "https://www.roblox.com/asset-thumbnail/image"
-            f"?assetId={uid}&width=768&height=432&format=png"
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        batch = universe_ids[i:i+BATCH_SIZE]
+        s     = ",".join(batch)
+        url   = (
+            "https://thumbnails.roblox.com/v1/games/thumbnails"
+            f"?universeIds={s}&size=768x432&format=Png"
         )
-        thumbs[str(uid)] = url
-        print(f"[fetch_thumbnails]  → {uid}: {url}")
+        print(f"[fetch_thumbnails] batch {i//BATCH_SIZE+1}")
+        try:
+            data = safe_get(url).get("data", [])
+            for e in data:
+                thumbs[str(e["targetId"])] = e["imageUrl"]
+            print(f"[fetch_thumbnails]   got {len(data)} URLs")
+        except HTTPError as e:
+            print(f"[fetch_thumbnails]   HTTPError, skipping batch: {e!r}")
 
     return thumbs
-
 
 
 # ─── Main scrape + snapshot + prune ────────────────────────────────────────────
