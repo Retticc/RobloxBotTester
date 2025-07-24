@@ -243,16 +243,28 @@ def fetch_user_groups(user_id):
     return [str(g["group"]["id"]) for g in data.get("data",[]) if "group" in g]
 
 def fetch_group_games(group_id):
+    """List public universes for a group, but skip on any GET failure."""
     games, cursor = [], ""
     base = f"https://games.roblox.com/v2/groups/{group_id}/games"
+
     while True:
         qs = f"accessFilter=Public&sortOrder=Asc&limit=50" + (f"&cursor={cursor}" if cursor else "")
-        data = safe_get(f"{base}?{qs}")
-        for it in data.get("data",[]):
-            games.append({"universeId":str(it["id"]), "name":it.get("name","")})
-        cursor = data.get("nextPageCursor","")
+        url = f"{base}?{qs}"
+        try:
+            data = safe_get(url)
+        except Exception as e:
+            print(f"[GroupGames] fetch for group {group_id} failed: {e}")
+            break           # bail out on this group, but don’t kill the whole run
+
+        for it in data.get("data", []):
+            games.append({
+                "universeId": str(it.get("id") or it.get("universeId")),
+                "name":       it.get("name", "")
+            })
+        cursor = data.get("nextPageCursor", "")
         if not cursor:
             break
+
     return games
 
 # ─── Roblox Metadata & Votes (GET + recursive chunking) ────────────────────────
