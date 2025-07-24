@@ -313,18 +313,30 @@ def fetch_icons(universe_ids):
 
 def fetch_thumbnails(universe_ids):
     """
-    Build redirect URLs for each universeId.
-    Download will catch 404s.
+    For each universeId, hit the asset-thumbnail-redirect endpoint,
+    follow the redirect, and return the final CDN URL.
     """
+    print(f"[fetch_thumbnails] total IDs={len(universe_ids)}")
     thumbs = {}
     for uid in universe_ids:
-        url = (
+        redirect_url = (
             "https://www.roblox.com/asset-thumbnail-redirect?"
             f"assetId={uid}&width=768&height=432&format=png"
         )
-        thumbs[str(uid)] = url
-        print(f"[fetch_thumbnails]  → redirect URL for {uid}")
+        try:
+            # sleep a bit to respect rate limits
+            time.sleep(RATE_LIMIT_DELAY + random.random() * 0.2)
+            sess = get_session()
+            # follow redirects so .url ends up as the tr.rbxcdn.com link
+            r = sess.get(redirect_url, allow_redirects=True, timeout=30)
+            r.raise_for_status()
+            final = r.url
+            print(f"[fetch_thumbnails] ✅ {uid} → {final}")
+            thumbs[str(uid)] = final
+        except Exception as e:
+            print(f"[fetch_thumbnails] ⚠️ failed {uid}: {e}")
     return thumbs
+
 
 # ─── Main scrape + snapshot + prune ────────────────────────────────────────────
 def scrape_and_snapshot():
