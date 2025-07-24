@@ -332,7 +332,7 @@ def scrape_and_snapshot():
     all_ids      = set()
     master_games = []
 
-    for uid in CREATORs:
+    for uid in CREATORS:
         own    = fetch_creator_games(uid)
         groups = fetch_user_groups(uid)
         grp    = []
