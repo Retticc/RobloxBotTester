@@ -339,7 +339,6 @@ def fetch_icons(universe_ids):
     return icons
 
 def fetch_thumbnails(universe_ids):
-    """Fetch thumbnails in BATCH_SIZE chunks, splitting on failure to skip only the bad IDs."""
     thumbs = {}
 
     def fetch_chunk(ids):
@@ -351,15 +350,15 @@ def fetch_thumbnails(universe_ids):
         try:
             data = safe_get(url).get("data", [])
             result = { str(e["targetId"]): e["imageUrl"] for e in data }
-             for gid, thumb_url in result.items():
+            # ← right here, after you have result, loop and print success
+            for gid, thumb_url in result.items():
                 print(f"[Thumbnails] ✅ got thumbnail for {gid}: {thumb_url}")
             return result
+
         except Exception as e:
-            # if it's just one ID, give up on it
             if len(ids) == 1:
                 print(f"[Thumbnails] skipping {ids[0]} (no thumbnail): {e}")
                 return {}
-            # otherwise split and retry
             mid = len(ids) // 2
             left  = fetch_chunk(ids[:mid])
             right = fetch_chunk(ids[mid:])
@@ -371,6 +370,7 @@ def fetch_thumbnails(universe_ids):
         thumbs.update(fetch_chunk(batch))
 
     return thumbs
+
 
 
 # ─── Core scrape + snapshot + prune ────────────────────────────────────────────
