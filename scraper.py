@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os, time, random, requests, pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import execute_values
@@ -357,7 +357,7 @@ def scrape_and_snapshot():
     save_snapshots(snaps)
     prune_stale([int(x) for x in all_list])
 
-    print(f"🕒 {len(all_list)} games snapped at {datetime.utcnow()}")
+    print(f"🕒 {len(all_list)} games snapped at {datetime.now(timezone.utc)}")
 
 def main():
     ensure_tables()
