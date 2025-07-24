@@ -321,30 +321,56 @@ def fetch_thumbnails(universe_ids):
 
     def fetch_batch(batch):
         s = ",".join(batch)
+        # Fixed URL - using multiget/thumbnails endpoint
         url = (
-            "https://thumbnails.roblox.com/v1/games/thumbnails"
+            "https://thumbnails.roblox.com/v1/games/multiget/thumbnails"
             f"?universeIds={s}&size=768x432&format=Png"
         )
         print(f"[fetch_thumbnails] batch size={len(batch)} → GET {url}")
         try:
-            data = safe_get(url).get("data", [])
-            print(f"[fetch_thumbnails]   got {len(data)} URLs")
-            for e in data:
-                thumbs[str(e["targetId"])] = e["imageUrl"]
+            response = safe_get(url)
+            data = response.get("data", [])
+            print(f"[fetch_thumbnails]   got {len(data)} thumbnail responses")
+            
+            # Process each thumbnail response
+            for game_data in data:
+                universe_id = str(game_data.get("universeId", ""))
+                thumbnails_list = game_data.get("thumbnails", [])
+                
+                if thumbnails_list and len(thumbnails_list) > 0:
+                    # Get the first thumbnail (you can modify this to get all thumbnails)
+                    first_thumbnail = thumbnails_list[0]
+                    if first_thumbnail.get("state") == "Completed":
+                        image_url = first_thumbnail.get("imageUrl", "")
+                        if image_url:
+                            thumbs[universe_id] = image_url
+                            print(f"[fetch_thumbnails]     ✓ got thumbnail for {universe_id}")
+                        else:
+                            print(f"[fetch_thumbnails]     ⚠ empty imageUrl for {universe_id}")
+                    else:
+                        print(f"[fetch_thumbnails]     ⚠ thumbnail not ready for {universe_id}: {first_thumbnail.get('state')}")
+                else:
+                    print(f"[fetch_thumbnails]     ⚠ no thumbnails for {universe_id}")
+                    
         except Exception as e:
             # if this batch failed, split it in two and retry
             print(f"[fetch_thumbnails]   batch error: {e!r}")
             if len(batch) > 1:
                 mid = len(batch) // 2
+                print(f"[fetch_thumbnails]   splitting batch into {mid} + {len(batch)-mid}")
                 fetch_batch(batch[:mid])
                 fetch_batch(batch[mid:])
+            else:
+                print(f"[fetch_thumbnails]   failed single ID: {batch[0]}")
 
-    # fire off each full‐size batch
+    # Process all batches
     for i in range(0, len(universe_ids), BATCH_SIZE):
-        fetch_batch(universe_ids[i : i + BATCH_SIZE])
+        batch = universe_ids[i : i + BATCH_SIZE]
+        print(f"[fetch_thumbnails] processing batch {i//BATCH_SIZE+1}/{(len(universe_ids)-1)//BATCH_SIZE+1}")
+        fetch_batch(batch)
 
+    print(f"[fetch_thumbnails] completed: got {len(thumbs)} thumbnail URLs out of {len(universe_ids)} requested")
     return thumbs
-
 
 
 # ─── Main scrape + snapshot + prune ────────────────────────────────────────────
@@ -383,34 +409,48 @@ def scrape_and_snapshot():
     # Download & snapshot
     snaps = []
     os.makedirs("thumbnails", exist_ok=True)
-    for g in meta:
-        uid       = str(g.get("universeId") or g.get("id"))
-        icon_url  = icons.get(uid)
-        thumb_url = thumbs.get(uid)
-        icon_path = thumb_path = None
+    # Replace the thumbnail download section in scrape_and_snapshot()
+# This goes in the loop where you process each game in meta:
 
-        if icon_url:
-            try:
-                icon_path = f"icons/{uid}.png"
-                with requests.get(icon_url, stream=True) as r:
-                    r.raise_for_status()
-                    with open(icon_path, "wb") as f:
-                        for chunk in r.iter_content(1024):
-                            f.write(chunk)
-            except HTTPError:
-                icon_path = None
+for g in meta:
+    uid       = str(g.get("universeId") or g.get("id"))
+    icon_url  = icons.get(uid)
+    thumb_url = thumbs.get(uid)
+    icon_path = thumb_path = None
 
-        if thumb_url:
-            try:
-                thumb_path = f"thumbnails/{uid}.png"
-                with requests.get(thumb_url, stream=True) as r:
-                    r.raise_for_status()
-                    with open(thumb_path, "wb") as f:
-                        for chunk in r.iter_content(1024):
+    # Icon download (your existing code is fine)
+    if icon_url:
+        try:
+            icon_path = f"icons/{uid}.png"
+            with requests.get(icon_url, stream=True, timeout=30) as r:
+                r.raise_for_status()
+                with open(icon_path, "wb") as f:
+                    for chunk in r.iter_content(1024):
+                        f.write(chunk)
+            print(f"[download] ✓ saved icon for {uid}")
+        except Exception as e:
+            print(f"[download] ⚠ failed to download icon for {uid}: {e!r}")
+            icon_path = None
+
+    # Improved thumbnail download
+    if thumb_url and thumb_url.strip():  # Check if URL is not empty
+        try:
+            thumb_path = f"thumbnails/{uid}.png"
+            print(f"[download] downloading thumbnail for {uid}: {thumb_url}")
+            with requests.get(thumb_url, stream=True, timeout=30) as r:
+                r.raise_for_status()
+                with open(thumb_path, "wb") as f:
+                    for chunk in r.iter_content(1024):
+                        if chunk:  # filter out keep-alive chunks
                             f.write(chunk)
-            except HTTPError as e:
-                print(f"[download] no thumbnail for {uid}, skipping ({e!r})")
-                thumb_path = None
+            print(f"[download] ✓ saved thumbnail for {uid}")
+        except Exception as e:
+            print(f"[download] ⚠ failed to download thumbnail for {uid}: {e!r}")
+            thumb_path = None
+    else:
+        print(f"[download] ⚠ no thumbnail URL available for {uid}")
+
+    # Rest of your snapshot code...
 
         snaps.append((
             int(uid),
