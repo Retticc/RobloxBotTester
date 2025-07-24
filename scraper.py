@@ -14,16 +14,16 @@ from requests.exceptions import ConnectionError as ReqConnError, HTTPError
 load_dotenv()
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
-DATABASE_URL        = os.getenv("DATABASE_URL")
-CREATORS           = [u.strip() for u in os.getenv("TARGET_CREATORS","").split(",") if u.strip()]
-TOKENS             = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS","").split(",") if t.strip()]
-MAX_IDS_PER_REQ    = 100
-env_batch          = int(os.getenv("BATCH_SIZE","100"))
-BATCH_SIZE         = max(1, min(env_batch, MAX_IDS_PER_REQ))
-RATE_LIMIT_DELAY   = float(os.getenv("RATE_LIMIT_DELAY","0.7"))
-PROXY_API_KEY      = os.getenv("PROXY_API_KEY","")
-PROXY_API_BASE     = os.getenv("PROXY_API_BASE","https://proxy-ipv4.com/client-api/v1")
-PROXY_URLS_FALLBACK= [p.strip() for p in os.getenv("PROXY_URLS","").split(",") if p.strip()]
+DATABASE_URL         = os.getenv("DATABASE_URL")
+CREATORS            = [u.strip() for u in os.getenv("TARGET_CREATORS","").split(",") if u.strip()]
+TOKENS              = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS","").split(",") if t.strip()]
+MAX_IDS_PER_REQ     = 100
+env_batch           = int(os.getenv("BATCH_SIZE","100"))
+BATCH_SIZE          = max(1, min(env_batch, MAX_IDS_PER_REQ))
+RATE_LIMIT_DELAY    = float(os.getenv("RATE_LIMIT_DELAY","0.7"))
+PROXY_API_KEY       = os.getenv("PROXY_API_KEY","")
+PROXY_API_BASE      = os.getenv("PROXY_API_BASE","https://proxy-ipv4.com/client-api/v1")
+PROXY_URLS_FALLBACK = [p.strip() for p in os.getenv("PROXY_URLS","").split(",") if p.strip()]
 
 print(f"[startup] batch size={BATCH_SIZE}, rate_delay={RATE_LIMIT_DELAY}")
 
@@ -32,7 +32,7 @@ def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def ensure_tables():
-    print("[db] Ensuring tables exist...")
+    print("[db] Ensuring tables exist…")
     ddl = """
     CREATE TABLE IF NOT EXISTS games (
       id   BIGINT PRIMARY KEY,
@@ -58,8 +58,11 @@ def ensure_tables():
     print("[db] Tables ready.")
 
 def upsert_games(games):
-    print(f"[db] Upserting {len(games)} games into `games`…")
-    sql = "INSERT INTO games(id,name) VALUES %s ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name"
+    print(f"[db] Upserting {len(games)} games…")
+    sql = """
+    INSERT INTO games(id,name) VALUES %s
+      ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name
+    """
     with get_conn() as conn:
         with conn.cursor() as cur:
             execute_values(cur, sql, games)
@@ -107,7 +110,6 @@ def fetch_proxies_from_api():
         for port_key, scheme in (("httpsPort","http"),("socks5Port","socks5")):
             if port := e.get(port_key):
                 proxies.append(f"{scheme}://{auth['login']}:{auth['password']}@{ip}:{port}")
-    # (ipv6, isp, mobile omitted for brevity…)
     print(f"[proxy] Retrieved {len(proxies)} proxies from API.")
     return proxies
 
@@ -126,9 +128,9 @@ def get_cookie():
 
 def get_user_agent():
     return random.choice([
-        "Mozilla/5.0 (Windows NT 10; Win64; x64)...",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)...",
-        "Mozilla/5.0 (X11; Linux x86_64)...",
+        "Mozilla/5.0 (Windows NT 10; Win64; x64)…",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)…",
+        "Mozilla/5.0 (X11; Linux x86_64)…",
     ])
 
 def get_session():
@@ -148,9 +150,10 @@ def safe_get(url, retries=3):
         try:
             r = sess.get(url,
                          headers={"User-Agent": get_user_agent(), "Accept": "application/json"},
-                         cookies=get_cookie(), timeout=30)
+                         cookies=get_cookie(),
+                         timeout=30)
             r.raise_for_status()
-            print(f"[safe_get]  ✓ success")
+            print("[safe_get]  ✓ success")
             return r.json()
         except (ProxyConnectionError, ReqConnError) as e:
             print(f"[safe_get]  proxy error: {e}")
@@ -177,20 +180,18 @@ def safe_post(url, json=None, retries=3):
         time.sleep(RATE_LIMIT_DELAY + random.random()*0.2)
         sess  = get_session()
         proxy = sess.proxies.get("https") or sess.proxies.get("http") or "direct"
-        print(f"[safe_post] try #{attempt} → POST {url} via {proxy} payload len={len(str(json))}")
+        print(f"[safe_post] try #{attempt} → POST {url} via {proxy}")
         try:
             r = sess.post(url, headers=headers, cookies=get_cookie(), json=json, timeout=30)
             r.raise_for_status()
-            print(f"[safe_post]  ✓ success")
+            print("[safe_post]  ✓ success")
             return r.json()
         except (ProxyConnectionError, ReqConnError) as e:
             print(f"[safe_post]  proxy error: {e}")
             if proxy != "direct" and proxy in PROXIES:
-                print(f"[safe_post]  removing dead proxy {proxy}")
                 PROXIES.remove(proxy)
             if PROXIES:
                 continue
-            print("[safe_post]  no proxies left, trying direct")
             sess.proxies.clear()
         except Exception as e:
             print(f"[safe_post]  error: {e}")
@@ -203,12 +204,12 @@ def fetch_creator_games(user_id):
     games, cursor = [], ""
     base = f"https://games.roblox.com/v2/users/{user_id}/games"
     while True:
-        qs = f"accessFilter=Public&sortOrder=Asc&limit=50" + (f"&cursor={cursor}" if cursor else "")
+        qs   = f"accessFilter=Public&sortOrder=Asc&limit=50" + (f"&cursor={cursor}" if cursor else "")
         data = safe_get(f"{base}?{qs}")
-        chunk = data.get("data",[])
+        chunk = data.get("data", [])
         print(f"[fetch_creator_games]   got {len(chunk)} games")
         for it in chunk:
-            games.append({"universeId":str(it["id"]), "name":it.get("name","")})
+            games.append({"universeId": str(it["id"]), "name": it.get("name","")})
         cursor = data.get("nextPageCursor","")
         if not cursor:
             break
@@ -270,7 +271,7 @@ def get_game_details(universe_ids):
 def get_game_votes(universe_ids):
     print(f"[get_game_votes] total IDs={len(universe_ids)}, batches of {BATCH_SIZE}")
     def fetch_chunk(ids):
-        s = ",".join(ids)
+        s   = ",".join(ids)
         url = f"https://games.roblox.com/v1/games/votes?universeIds={s}"
         try:
             data = safe_get(url).get("data",[])
@@ -296,8 +297,8 @@ def fetch_icons(universe_ids):
     os.makedirs("icons", exist_ok=True)
     for i in range(0, len(universe_ids), BATCH_SIZE):
         batch = universe_ids[i:i+BATCH_SIZE]
-        s = ",".join(batch)
-        url = f"https://thumbnails.roblox.com/v1/games/icons?universeIds={s}&size=512x512&format=Png"
+        s     = ",".join(batch)
+        url   = f"https://thumbnails.roblox.com/v1/games/icons?universeIds={s}&size=512x512&format=Png"
         print(f"[fetch_icons] batch {i//BATCH_SIZE+1}")
         try:
             for e in safe_get(url).get("data",[]):
@@ -309,8 +310,8 @@ def fetch_icons(universe_ids):
 
 def fetch_thumbnails(universe_ids):
     """
-    Instead of using the thumbnails.roblox.com API (which was 404ing on many),
-    we just build and store the redirect URL for each place.
+    Build redirect URLs for each universeId.
+    On download we’ll catch 404s and skip.
     """
     thumbs = {}
     for uid in universe_ids:
@@ -319,26 +320,26 @@ def fetch_thumbnails(universe_ids):
             f"assetId={uid}&width=768&height=432&format=png"
         )
         thumbs[str(uid)] = url
-        print(f"[fetch_thumbnails]  → using redirect URL for {uid}")
+        print(f"[fetch_thumbnails]  → redirect URL for {uid}")
     return thumbs
 
 # ─── Main scrape + snapshot + prune ────────────────────────────────────────────
 def scrape_and_snapshot():
     print("[main] Starting scrape run")
-    all_ids = set()
+    all_ids      = set()
     master_games = []
 
     for uid in CREATORS:
         own    = fetch_creator_games(uid)
         groups = fetch_user_groups(uid)
-        grp_games = []
+        grp    = []
         for g in groups:
-            grp_games.extend(fetch_group_games(g))
-        for g in own + grp_games:
+            grp.extend(fetch_group_games(g))
+        for g in own + grp:
             all_ids.add(g["universeId"])
             master_games.append((int(g["universeId"]), g["name"]))
 
-    print(f"[main] Found {len(master_games)} total entries ({len(all_ids)} unique universeIds)")
+    print(f"[main] Found {len(master_games)} entries ({len(all_ids)} unique)")
     all_list = list(all_ids)
     if not all_list:
         print("[main] No games found; exiting.")
@@ -349,37 +350,43 @@ def scrape_and_snapshot():
     icons  = fetch_icons(all_list)
     thumbs = fetch_thumbnails(all_list)
 
-    # ─── Deduplicate before upsert ───────────────────────────────────────
-    unique = {}
-    for gid, name in master_games:
-        unique[gid] = name
-    deduped = list(unique.items())
-    print(f"[main] Deduped to {len(deduped)} unique games (from {len(master_games)})")
+    # Dedupe before upsert
+    unique_map = { gid:name for gid,name in master_games }
+    deduped    = list(unique_map.items())
+    print(f"[main] Deduped to {len(deduped)} unique games")
     upsert_games(deduped)
 
-    # ─── Download & snapshot ────────────────────────────────────────────
+    # Download & snapshot
     snaps = []
     os.makedirs("thumbnails", exist_ok=True)
     for g in meta:
-        uid = str(g.get("universeId") or g.get("id"))
+        uid       = str(g.get("universeId") or g.get("id"))
         icon_url  = icons.get(uid)
         thumb_url = thumbs.get(uid)
+        icon_path = thumb_path = None
 
-        icon_path, thumb_path = None, None
         if icon_url:
-            icon_path = f"icons/{uid}.png"
-            with requests.get(icon_url, stream=True) as r:
-                r.raise_for_status()
-                with open(icon_path, "wb") as f:
-                    for chunk in r.iter_content(1024):
-                        f.write(chunk)
+            try:
+                icon_path = f"icons/{uid}.png"
+                with requests.get(icon_url, stream=True) as r:
+                    r.raise_for_status()
+                    with open(icon_path, "wb") as f:
+                        for chunk in r.iter_content(1024):
+                            f.write(chunk)
+            except HTTPError:
+                icon_path = None
+
         if thumb_url:
-            thumb_path = f"thumbnails/{uid}.png"
-            with requests.get(thumb_url, stream=True) as r:
-                r.raise_for_status()
-                with open(thumb_path, "wb") as f:
-                    for chunk in r.iter_content(1024):
-                        f.write(chunk)
+            try:
+                thumb_path = f"thumbnails/{uid}.png"
+                with requests.get(thumb_url, stream=True) as r:
+                    r.raise_for_status()
+                    with open(thumb_path, "wb") as f:
+                        for chunk in r.iter_content(1024):
+                            f.write(chunk)
+            except HTTPError as e:
+                print(f"[download] no thumbnail for {uid}, skipping ({e})")
+                thumb_path = None
 
         snaps.append((
             int(uid),
