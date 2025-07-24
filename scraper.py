@@ -14,16 +14,16 @@ from requests.exceptions import ConnectionError as ReqConnError, HTTPError
 load_dotenv()
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
-DATABASE_URL      = os.getenv("DATABASE_URL")
-CREATORS         = [u.strip() for u in os.getenv("TARGET_CREATORS","").split(",") if u.strip()]
-TOKENS           = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS","").split(",") if t.strip()]
-MAX_IDS_PER_REQ  = 100
-env_batch        = int(os.getenv("BATCH_SIZE","100"))
-BATCH_SIZE       = max(1, min(env_batch, MAX_IDS_PER_REQ))
-RATE_LIMIT_DELAY = float(os.getenv("RATE_LIMIT_DELAY","0.7"))
-PROXY_API_KEY    = os.getenv("PROXY_API_KEY","")
-PROXY_API_BASE   = os.getenv("PROXY_API_BASE","https://proxy-ipv4.com/client-api/v1")
-PROXY_URLS_FALLBACK = [p.strip() for p in os.getenv("PROXY_URLS","").split(",") if p.strip()]
+DATABASE_URL        = os.getenv("DATABASE_URL")
+CREATORS           = [u.strip() for u in os.getenv("TARGET_CREATORS","").split(",") if u.strip()]
+TOKENS             = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS","").split(",") if t.strip()]
+MAX_IDS_PER_REQ    = 100
+env_batch          = int(os.getenv("BATCH_SIZE","100"))
+BATCH_SIZE         = max(1, min(env_batch, MAX_IDS_PER_REQ))
+RATE_LIMIT_DELAY   = float(os.getenv("RATE_LIMIT_DELAY","0.7"))
+PROXY_API_KEY      = os.getenv("PROXY_API_KEY","")
+PROXY_API_BASE     = os.getenv("PROXY_API_BASE","https://proxy-ipv4.com/client-api/v1")
+PROXY_URLS_FALLBACK= [p.strip() for p in os.getenv("PROXY_URLS","").split(",") if p.strip()]
 
 print(f"[startup] batch size={BATCH_SIZE}, rate_delay={RATE_LIMIT_DELAY}")
 
@@ -159,16 +159,11 @@ def safe_get(url, retries=3):
                 PROXIES.remove(proxy)
             if PROXIES:
                 continue
-            else:
-                print("[safe_get]  no proxies left, trying direct")
-                sess.proxies.clear()
-                continue
+            print("[safe_get]  no proxies left, trying direct")
+            sess.proxies.clear()
         except Exception as e:
             print(f"[safe_get]  error: {e}")
             last_err = e
-            if attempt < retries:
-                continue
-            raise
     raise RuntimeError(f"GET failed after {retries} attempts: {url}\nLast error: {last_err}")
 
 def safe_post(url, json=None, retries=3):
@@ -195,16 +190,11 @@ def safe_post(url, json=None, retries=3):
                 PROXIES.remove(proxy)
             if PROXIES:
                 continue
-            else:
-                print("[safe_post]  no proxies left, trying direct")
-                sess.proxies.clear()
-                continue
+            print("[safe_post]  no proxies left, trying direct")
+            sess.proxies.clear()
         except Exception as e:
             print(f"[safe_post]  error: {e}")
             last_err = e
-            if attempt < retries:
-                continue
-            raise
     raise RuntimeError(f"POST failed after {retries} attempts: {url}\nLast error: {last_err}")
 
 # ─── Roblox endpoints ─────────────────────────────────────────────────────────
@@ -290,8 +280,7 @@ def get_game_votes(universe_ids):
             if len(ids)==1:
                 return {}
             m = len(ids)//2
-            a = fetch_chunk(ids[:m])
-            b = fetch_chunk(ids[m:])
+            a = fetch_chunk(ids[:m]); b = fetch_chunk(ids[m:])
             a.update(b); return a
     votes = {}
     for i in range(0, len(universe_ids), BATCH_SIZE):
@@ -320,20 +309,18 @@ def fetch_icons(universe_ids):
 
 def fetch_thumbnails(universe_ids):
     """
-    Instead of using the thumbnails.roblox.com API (which is returning 404s for a lot of placeIds),
-    we just construct the “asset-thumbnail-redirect” URL directly for each universeId.
+    Instead of using the thumbnails.roblox.com API (which was 404ing on many),
+    we just build and store the redirect URL for each place.
     """
     thumbs = {}
     for uid in universe_ids:
-        # Build the redirect URL—Roblox will 302 you to the current thumbnail image
         url = (
             "https://www.roblox.com/asset-thumbnail-redirect?"
             f"assetId={uid}&width=768&height=432&format=png"
         )
         thumbs[str(uid)] = url
-        print(f"[fetch_thumbnails]  → using redirect URL for {uid}: {url}")
+        print(f"[fetch_thumbnails]  → using redirect URL for {uid}")
     return thumbs
-
 
 # ─── Main scrape + snapshot + prune ────────────────────────────────────────────
 def scrape_and_snapshot():
@@ -350,8 +337,8 @@ def scrape_and_snapshot():
         for g in own + grp_games:
             all_ids.add(g["universeId"])
             master_games.append((int(g["universeId"]), g["name"]))
-    print(f"[main] Found {len(master_games)} total game entries ({len(all_ids)} unique)")
 
+    print(f"[main] Found {len(master_games)} total entries ({len(all_ids)} unique universeIds)")
     all_list = list(all_ids)
     if not all_list:
         print("[main] No games found; exiting.")
@@ -362,15 +349,22 @@ def scrape_and_snapshot():
     icons  = fetch_icons(all_list)
     thumbs = fetch_thumbnails(all_list)
 
-    upsert_games(master_games)
+    # ─── Deduplicate before upsert ───────────────────────────────────────
+    unique = {}
+    for gid, name in master_games:
+        unique[gid] = name
+    deduped = list(unique.items())
+    print(f"[main] Deduped to {len(deduped)} unique games (from {len(master_games)})")
+    upsert_games(deduped)
 
+    # ─── Download & snapshot ────────────────────────────────────────────
     snaps = []
+    os.makedirs("thumbnails", exist_ok=True)
     for g in meta:
         uid = str(g.get("universeId") or g.get("id"))
         icon_url  = icons.get(uid)
         thumb_url = thumbs.get(uid)
 
-        # download icons
         icon_path, thumb_path = None, None
         if icon_url:
             icon_path = f"icons/{uid}.png"
