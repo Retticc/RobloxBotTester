@@ -350,7 +350,10 @@ def fetch_thumbnails(universe_ids):
         )
         try:
             data = safe_get(url).get("data", [])
-            return { str(e["targetId"]): e["imageUrl"] for e in data }
+            result = { str(e["targetId"]): e["imageUrl"] for e in data }
+             for gid, thumb_url in result.items():
+                print(f"[Thumbnails] ✅ got thumbnail for {gid}: {thumb_url}")
+            return result
         except Exception as e:
             # if it's just one ID, give up on it
             if len(ids) == 1:
