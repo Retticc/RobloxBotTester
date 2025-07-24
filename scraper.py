@@ -4,7 +4,6 @@ import time
 import random
 import requests
 import psycopg2
-import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 from psycopg2.extras import execute_values
@@ -102,7 +101,7 @@ def fetch_proxies_from_api():
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        print(f"[proxy] API error: {e}")
+        print(f"[proxy] API error: {e!r}")
         return []
     proxies = []
     for e in data.get("ipv4", []):
@@ -127,10 +126,14 @@ def get_cookie():
     return {".ROBLOSECURITY": tok}
 
 def get_user_agent():
+    # Pure ASCII User‑Agents only
     return random.choice([
-        "Mozilla/5.0 (Windows NT 10; Win64; x64)…",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)…",
-        "Mozilla/5.0 (X11; Linux x86_64)…",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36/"
+        "Chrome/126.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36/"
+        "Chrome/126.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36/"
+        "Chrome/126.0.0.0 Safari/537.36",
     ])
 
 def get_session():
@@ -148,26 +151,26 @@ def safe_get(url, retries=3):
         proxy = sess.proxies.get("https") or sess.proxies.get("http") or "direct"
         print(f"[safe_get] try #{attempt} → GET {url} via {proxy}")
         try:
-            r = sess.get(url,
-                         headers={"User-Agent": get_user_agent(), "Accept": "application/json"},
-                         cookies=get_cookie(),
-                         timeout=30)
+            r = sess.get(
+                url,
+                headers={"User-Agent": get_user_agent(), "Accept": "application/json"},
+                cookies=get_cookie(),
+                timeout=30
+            )
             r.raise_for_status()
             print("[safe_get]  ✓ success")
             return r.json()
         except (ProxyConnectionError, ReqConnError) as e:
-            print(f"[safe_get]  proxy error: {e}")
+            print(f"[safe_get]  proxy error: {e!r}")
             if proxy != "direct" and proxy in PROXIES:
-                print(f"[safe_get]  removing dead proxy {proxy}")
                 PROXIES.remove(proxy)
             if PROXIES:
                 continue
-            print("[safe_get]  no proxies left, trying direct")
             sess.proxies.clear()
         except Exception as e:
-            print(f"[safe_get]  error: {e}")
+            print(f"[safe_get]  error: {e!r}")
             last_err = e
-    raise RuntimeError(f"GET failed after {retries} attempts: {url}\nLast error: {last_err}")
+    raise RuntimeError(f"GET failed after {retries} attempts: {url!r}\nLast error: {last_err!r}")
 
 def safe_post(url, json=None, retries=3):
     headers = {
@@ -187,16 +190,16 @@ def safe_post(url, json=None, retries=3):
             print("[safe_post]  ✓ success")
             return r.json()
         except (ProxyConnectionError, ReqConnError) as e:
-            print(f"[safe_post]  proxy error: {e}")
+            print(f"[safe_post]  proxy error: {e!r}")
             if proxy != "direct" and proxy in PROXIES:
                 PROXIES.remove(proxy)
             if PROXIES:
                 continue
             sess.proxies.clear()
         except Exception as e:
-            print(f"[safe_post]  error: {e}")
+            print(f"[safe_post]  error: {e!r}")
             last_err = e
-    raise RuntimeError(f"POST failed after {retries} attempts: {url}\nLast error: {last_err}")
+    raise RuntimeError(f"POST failed after {retries} attempts: {url!r}\nLast error: {last_err!r}")
 
 # ─── Roblox endpoints ─────────────────────────────────────────────────────────
 def fetch_creator_games(user_id):
@@ -231,7 +234,7 @@ def fetch_group_games(group_id):
         try:
             data = safe_get(f"{base}?{qs}")
         except Exception as e:
-            print(f"[fetch_group_games]  FAILED: {e}")
+            print(f"[fetch_group_games]  FAILED: {e!r}")
             break
         chunk = data.get("data",[])
         print(f"[fetch_group_games]   got {len(chunk)} games")
@@ -305,13 +308,13 @@ def fetch_icons(universe_ids):
                 icons[str(e["targetId"])] = e["imageUrl"]
             print(f"[fetch_icons]   got {len(batch)} URLs")
         except HTTPError as e:
-            print(f"[fetch_icons]   HTTPError, skipping batch: {e}")
+            print(f"[fetch_icons]   HTTPError, skipping batch: {e!r}")
     return icons
 
 def fetch_thumbnails(universe_ids):
     """
     Build redirect URLs for each universeId.
-    On download we’ll catch 404s and skip.
+    Download will catch 404s.
     """
     thumbs = {}
     for uid in universe_ids:
@@ -329,7 +332,7 @@ def scrape_and_snapshot():
     all_ids      = set()
     master_games = []
 
-    for uid in CREATORS:
+    for uid in CREATORs:
         own    = fetch_creator_games(uid)
         groups = fetch_user_groups(uid)
         grp    = []
@@ -385,7 +388,7 @@ def scrape_and_snapshot():
                         for chunk in r.iter_content(1024):
                             f.write(chunk)
             except HTTPError as e:
-                print(f"[download] no thumbnail for {uid}, skipping ({e})")
+                print(f"[download] no thumbnail for {uid}, skipping ({e!r})")
                 thumb_path = None
 
         snaps.append((
