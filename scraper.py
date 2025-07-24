@@ -10,7 +10,6 @@ from psycopg2.extras import execute_values
 from socks import ProxyConnectionError
 from requests.exceptions import ConnectionError as ReqConnError, HTTPError
 import os
-from requests.exceptions import HTTPError
 
 
 load_dotenv()
@@ -320,23 +319,32 @@ def fetch_thumbnails(universe_ids):
     thumbs = {}
     os.makedirs("thumbnails", exist_ok=True)
 
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        batch = universe_ids[i:i+BATCH_SIZE]
-        s     = ",".join(batch)
-        url   = (
+    def fetch_batch(batch):
+        s = ",".join(batch)
+        url = (
             "https://thumbnails.roblox.com/v1/games/thumbnails"
             f"?universeIds={s}&size=768x432&format=Png"
         )
-        print(f"[fetch_thumbnails] batch {i//BATCH_SIZE+1}")
+        print(f"[fetch_thumbnails] batch size={len(batch)} → GET {url}")
         try:
             data = safe_get(url).get("data", [])
+            print(f"[fetch_thumbnails]   got {len(data)} URLs")
             for e in data:
                 thumbs[str(e["targetId"])] = e["imageUrl"]
-            print(f"[fetch_thumbnails]   got {len(data)} URLs")
-        except HTTPError as e:
-            print(f"[fetch_thumbnails]   HTTPError, skipping batch: {e!r}")
+        except Exception as e:
+            # if this batch failed, split it in two and retry
+            print(f"[fetch_thumbnails]   batch error: {e!r}")
+            if len(batch) > 1:
+                mid = len(batch) // 2
+                fetch_batch(batch[:mid])
+                fetch_batch(batch[mid:])
+
+    # fire off each full‐size batch
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        fetch_batch(universe_ids[i : i + BATCH_SIZE])
 
     return thumbs
+
 
 
 # ─── Main scrape + snapshot + prune ────────────────────────────────────────────
