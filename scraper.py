@@ -312,30 +312,28 @@ def fetch_icons(universe_ids):
     return icons
 
 def fetch_thumbnails(universe_ids):
-    """
-    For each universeId, hit the asset-thumbnail-redirect endpoint,
-    follow the redirect, and return the final CDN URL.
-    """
-    print(f"[fetch_thumbnails] total IDs={len(universe_ids)}")
+    print(f"[fetch_thumbnails] total IDs={len(universe_ids)}, batches of {BATCH_SIZE}")
     thumbs = {}
-    for uid in universe_ids:
-        redirect_url = (
-            "https://www.roblox.com/asset-thumbnail-redirect?"
-            f"assetId={uid}&width=768&height=432&format=png"
+    os.makedirs("thumbnails", exist_ok=True)
+
+    for i in range(0, len(universe_ids), BATCH_SIZE):
+        batch = universe_ids[i : i + BATCH_SIZE]
+        s     = ",".join(batch)
+        # Use 768x432 here instead of 512x512
+        url   = (
+            "https://thumbnails.roblox.com/v1/games/thumbnails"
+            f"?universeIds={s}&size=768x432&format=Png"
         )
+        print(f"[fetch_thumbnails] batch {i//BATCH_SIZE+1}")
         try:
-            # sleep a bit to respect rate limits
-            time.sleep(RATE_LIMIT_DELAY + random.random() * 0.2)
-            sess = get_session()
-            # follow redirects so .url ends up as the tr.rbxcdn.com link
-            r = sess.get(redirect_url, allow_redirects=True, timeout=30)
-            r.raise_for_status()
-            final = r.url
-            print(f"[fetch_thumbnails] ✅ {uid} → {final}")
-            thumbs[str(uid)] = final
-        except Exception as e:
-            print(f"[fetch_thumbnails] ⚠️ failed {uid}: {e}")
+            data = safe_get(url).get("data", [])
+            for e in data:
+                thumbs[str(e["targetId"])] = e["imageUrl"]
+            print(f"[fetch_thumbnails]   got {len(data)} URLs")
+        except HTTPError as e:
+            print(f"[fetch_thumbnails]   HTTPError, skipping batch: {e}")
     return thumbs
+
 
 
 # ─── Main scrape + snapshot + prune ────────────────────────────────────────────
