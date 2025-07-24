@@ -21,7 +21,7 @@ PROXY_URLS_FALLBACK = [p.strip() for p in os.getenv("PROXY_URLS","").split(",") 
 
 # ─── Database Helpers ──────────────────────────────────────────────────────────
 def get_conn():
-     return psycopg2.connect(DATABASE_URL, sslmode="require")
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def ensure_tables():
     ddl = """
@@ -49,17 +49,23 @@ def ensure_tables():
 
 def upsert_games(games):
     """games = list of (id,name)"""
-    sql = "INSERT INTO games(id,name) VALUES %s ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name"
+    # dedupe by id
+    seen = set()
+    deduped = []
+    for gid, name in games:
+        if gid not in seen:
+            seen.add(gid)
+            deduped.append((gid, name))
+    sql = """
+      INSERT INTO games(id,name) VALUES %s
+      ON CONFLICT(id) DO UPDATE SET name = EXCLUDED.name
+    """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            execute_values(cur, sql, games)
+            execute_values(cur, sql, deduped)
             conn.commit()
 
 def save_snapshots(snaps):
-    """
-    snaps = list of tuples:
-      (game_id, playing, visits, favorites, likes, dislikes, icon_url, thumbnail_url)
-    """
     sql = """
     INSERT INTO snapshots
       (game_id, playing, visits, favorites, likes, dislikes, icon_url, thumbnail_url)
@@ -71,8 +77,7 @@ def save_snapshots(snaps):
             conn.commit()
 
 def prune_stale(current_ids):
-    """Remove any games & snapshots not in current_ids."""
-    ids = tuple(current_ids) or (0,)  # avoid empty tuple
+    ids = tuple(current_ids) or (0,)
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM snapshots WHERE game_id NOT IN %s", (ids,))
@@ -87,8 +92,7 @@ def fetch_proxies_from_api():
         resp = requests.get(f"{PROXY_API_BASE}/{PROXY_API_KEY}/get/proxies", timeout=10)
         resp.raise_for_status()
         data = resp.json()
-    except Exception as e:
-        print(f"[ProxyAPI] error: {e}")
+    except:
         return []
     proxies = []
     for e in data.get("ipv4", []):
@@ -140,88 +144,57 @@ from requests.exceptions import ConnectionError as ReqConnError
 
 def safe_get(url, retries=3):
     last_err = None
-
     for attempt in range(retries):
-        time.sleep(RATE_LIMIT_DELAY + random.random() * 0.3)
+        time.sleep(RATE_LIMIT_DELAY + random.random()*0.3)
         sess = get_session()
         proxy = sess.proxies.get("https") or sess.proxies.get("http")
-
         try:
-            r = sess.get(
-                url,
-                headers={"User-Agent": get_user_agent(), "Accept": "application/json"},
-                cookies=get_cookie(),
-                timeout=30
-            )
+            r = sess.get(url,
+                         headers={"User-Agent":get_user_agent(),"Accept":"application/json"},
+                         cookies=get_cookie(), timeout=30)
             if r.ok:
                 return r.json()
             r.raise_for_status()
-
-        except (ProxyConnectionError, ReqConnError) as e:
-            last_err = e
-            # if it was a proxy we just tried, drop it
+        except (ProxyConnectionError, ReqConnError):
             if proxy in PROXIES:
-                print(f"[proxy] removing dead proxy {proxy}")
                 PROXIES.remove(proxy)
-            # if we still have proxies, retry immediately
             if PROXIES:
                 continue
-            # otherwise fall through to retry without proxy
-            print("[proxy] no proxies left, trying direct connection")
             sess.proxies.clear()
             continue
-
         except Exception as e:
             last_err = e
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+            if attempt < retries-1:
+                time.sleep(2**attempt)
                 continue
             raise
-
-    # if we get here, everything failed
     raise RuntimeError(f"GET failed after {retries} attempts: {url}\nLast error: {last_err}")
 
-
-from socks import ProxyConnectionError
-from requests.exceptions import ConnectionError as ReqConnError
-
 def safe_post(url, json=None, retries=3):
-    headers = {
-        "User‑Agent": get_user_agent(),
-        "Accept":      "application/json",
-        "Content-Type":"application/json"
-    }
+    headers = {"User-Agent":get_user_agent(),"Accept":"application/json","Content-Type":"application/json"}
     last_err = None
-
     for attempt in range(retries):
-        time.sleep(RATE_LIMIT_DELAY + random.random() * 0.3)
+        time.sleep(RATE_LIMIT_DELAY + random.random()*0.3)
         sess = get_session()
         proxy = sess.proxies.get("https") or sess.proxies.get("http")
-
         try:
             r = sess.post(url, headers=headers, cookies=get_cookie(), json=json, timeout=30)
             if r.ok:
                 return r.json()
             r.raise_for_status()
-
-        except (ProxyConnectionError, ReqConnError) as e:
-            last_err = e
+        except (ProxyConnectionError, ReqConnError):
             if proxy in PROXIES:
-                print(f"[proxy] removing dead proxy {proxy}")
                 PROXIES.remove(proxy)
             if PROXIES:
                 continue
-            print("[proxy] no proxies left, trying direct")
             sess.proxies.clear()
             continue
-
         except Exception as e:
             last_err = e
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+            if attempt < retries-1:
+                time.sleep(2**attempt)
                 continue
             raise
-
     raise RuntimeError(f"POST failed after {retries} attempts: {url}\nLast error: {last_err}")
 
 # ─── Roblox endpoints ─────────────────────────────────────────────────────────
@@ -243,168 +216,128 @@ def fetch_user_groups(user_id):
     return [str(g["group"]["id"]) for g in data.get("data",[]) if "group" in g]
 
 def fetch_group_games(group_id):
-    """List public universes for a group, but skip on any GET failure."""
     games, cursor = [], ""
     base = f"https://games.roblox.com/v2/groups/{group_id}/games"
-
     while True:
         qs = f"accessFilter=Public&sortOrder=Asc&limit=50" + (f"&cursor={cursor}" if cursor else "")
-        url = f"{base}?{qs}"
         try:
-            data = safe_get(url)
-        except Exception as e:
-            print(f"[GroupGames] fetch for group {group_id} failed: {e}")
-            break           # bail out on this group, but don’t kill the whole run
-
-        for it in data.get("data", []):
-            games.append({
-                "universeId": str(it.get("id") or it.get("universeId")),
-                "name":       it.get("name", "")
-            })
-        cursor = data.get("nextPageCursor", "")
+            data = safe_get(f"{base}?{qs}")
+        except:
+            break
+        for it in data.get("data",[]):
+            games.append({"universeId":str(it["id"]), "name":it.get("name","")})
+        cursor = data.get("nextPageCursor","")
         if not cursor:
             break
-
     return games
 
-# ─── Roblox Metadata & Votes (GET + recursive chunking) ────────────────────────
+# ─── Metadata & votes via GET (with split fallback) ───────────────────────────
 def get_game_details(universe_ids):
-    """Fetch metadata via GET /v1/games?universeIds=… in batches and
-       fall back by splitting a batch in half on failure."""
     def fetch_chunk(ids):
-        ids_str = ",".join(ids)
-        url     = f"https://games.roblox.com/v1/games?universeIds={ids_str}"
+        qs = ",".join(ids)
+        url = f"https://games.roblox.com/v1/games?universeIds={qs}"
         try:
-            return safe_get(url).get("data", [])
-        except Exception:
-            if len(ids) == 1:
-                return []  # give up on this single universe
-            mid = len(ids) // 2
-            return fetch_chunk(ids[:mid]) + fetch_chunk(ids[mid:])
-
-    details = []
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        batch = universe_ids[i : i + BATCH_SIZE]
-        details.extend(fetch_chunk(batch))
-    return details
+            return safe_get(url).get("data",[])
+        except:
+            if len(ids)==1: return []
+            mid=len(ids)//2
+            return fetch_chunk(ids[:mid])+fetch_chunk(ids[mid:])
+    out=[]
+    for i in range(0,len(universe_ids),BATCH_SIZE):
+        out+=fetch_chunk(universe_ids[i:i+BATCH_SIZE])
+    return out
 
 def get_game_votes(universe_ids):
-    """Fetch votes via GET /v1/games/votes?universeIds=… in batches."""
     def fetch_chunk(ids):
-        ids_str = ",".join(ids)
-        url     = f"https://games.roblox.com/v1/games/votes?universeIds={ids_str}"
+        qs = ",".join(ids)
+        url = f"https://games.roblox.com/v1/games/votes?universeIds={qs}"
         try:
-            data = safe_get(url).get("data", [])
-            return { str(v["id"]): {"upVotes": v["upVotes"], "downVotes": v["downVotes"]} 
-                     for v in data }
-        except Exception:
-            if len(ids) == 1:
-                return {}
-            mid = len(ids) // 2
-            a = fetch_chunk(ids[:mid])
-            b = fetch_chunk(ids[mid:])
-            a.update(b)
-            return a
-
-    votes = {}
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        batch = universe_ids[i : i + BATCH_SIZE]
-        votes.update(fetch_chunk(batch))
+            data = safe_get(url).get("data",[])
+            return {str(v["id"]):{"upVotes":v["upVotes"],"downVotes":v["downVotes"]} for v in data}
+        except:
+            if len(ids)==1: return {}
+            mid=len(ids)//2
+            a=fetch_chunk(ids[:mid]); b=fetch_chunk(ids[mid:])
+            a.update(b); return a
+    votes={}
+    for i in range(0,len(universe_ids),BATCH_SIZE):
+        votes.update(fetch_chunk(universe_ids[i:i+BATCH_SIZE]))
     return votes
 
-# ─── Chunked Thumbnails & Icons ───────────────────────────────────────────────
-
-from requests.exceptions import HTTPError
-
+# ─── Fetch icons & thumbnails via API, fallback to redirect URL ──────────────
 def fetch_icons(universe_ids):
-    icons = {}
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        batch = universe_ids[i : i + BATCH_SIZE]
-        qs    = ",".join(batch)
-        url   = (
-            "https://thumbnails.roblox.com/v1/games/icons"
-            f"?universeIds={qs}&size=512x512&format=Png"
-        )
+    icons={}
+    for i in range(0,len(universe_ids),BATCH_SIZE):
+        batch=universe_ids[i:i+BATCH_SIZE]
+        qs=",".join(batch)
+        url=f"https://thumbnails.roblox.com/v1/games/icons?universeIds={qs}&size=512x512&format=Png"
         try:
-            data = safe_get(url).get("data", [])
-            for entry in data:
-                icons[str(entry["targetId"])] = entry["imageUrl"]
-        except HTTPError as e:
-            print(f"[Icons] batch {i//BATCH_SIZE+1} failed: {e}")
-            if len(batch) > 1:
-                # split and retry smaller chunks
-                mid = len(batch)//2
-                icons.update(fetch_icons(batch[:mid]))
-                icons.update(fetch_icons(batch[mid:]))
+            for e in safe_get(url).get("data",[]):
+                icons[str(e["targetId"])] = e["imageUrl"]
+        except:
+            pass
     return icons
 
 def fetch_thumbnails(universe_ids):
-    thumbs = {}
-
-    def fetch_chunk(ids):
-        qs  = ",".join(ids)
-        url = (
-            "https://thumbnails.roblox.com/v1/games/thumbnails"
-            f"?universeIds={qs}&size=768x432&format=Png"
-        )
+    thumbs={}
+    meta_map = { str(g["universeId"]):g for g in meta_all }  # filled in main
+    for i in range(0,len(universe_ids),BATCH_SIZE):
+        batch=universe_ids[i:i+BATCH_SIZE]
+        qs=",".join(batch)
+        url=f"https://thumbnails.roblox.com/v1/games/thumbnails?universeIds={qs}&size=768x432&format=Png"
         try:
-            data = safe_get(url).get("data", [])
-            result = { str(e["targetId"]): e["imageUrl"] for e in data }
-            # ← right here, after you have result, loop and print success
-            for gid, thumb_url in result.items():
-                print(f"[Thumbnails] ✅ got thumbnail for {gid}: {thumb_url}")
-            return result
-
-        except Exception as e:
-            if len(ids) == 1:
-                print(f"[Thumbnails] skipping {ids[0]} (no thumbnail): {e}")
-                return {}
-            mid = len(ids) // 2
-            left  = fetch_chunk(ids[:mid])
-            right = fetch_chunk(ids[mid:])
-            left.update(right)
-            return left
-
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        batch = universe_ids[i : i + BATCH_SIZE]
-        thumbs.update(fetch_chunk(batch))
-
+            for e in safe_get(url).get("data",[]):
+                gid=str(e["targetId"])
+                thumbs[gid]=e["imageUrl"]
+                print(f"[Thumbnails] ✅ got {gid}")
+        except:
+            # fallback per-ID
+            for gid in batch:
+                try:
+                    # redirect URL endpoint:
+                    thumb_url = (
+                      f"https://www.roblox.com/asset-thumbnail-redirect?"
+                      f"assetId={meta_map[gid]['rootPlaceId'] or gid}"
+                      f"&width=768&height=432&format=png"
+                    )
+                    r = requests.get(thumb_url, timeout=10)
+                    if r.ok:
+                        # save locally
+                        os.makedirs("thumbnails", exist_ok=True)
+                        fn = f"thumbnails/{gid}.png"
+                        with open(fn,"wb") as f: f.write(r.content)
+                        thumbs[gid]=fn
+                        print(f"[Thumbnails] ⚙️ downloaded fallback for {gid}")
+                except:
+                    print(f"[Thumbnails] ✖ skipping {gid}")
     return thumbs
 
-
-
-# ─── Core scrape + snapshot + prune ────────────────────────────────────────────
+# ─── Main scrape+snapshot ─────────────────────────────────────────────────────
 def scrape_and_snapshot():
-    all_ids = set()
-    master_games = []
-
+    global meta_all
+    all_ids=set(); master=[]
     for uid in CREATORS:
-        own   = fetch_creator_games(uid)
-        groups= fetch_user_groups(uid)
-        grp   = []
-        for g in groups:
-            grp.extend(fetch_group_games(g))
+        own=fetch_creator_games(uid)
+        grps=fetch_user_groups(uid)
+        grp=[]
+        for g in grps:
+            grp+=fetch_group_games(g)
         for g in own+grp:
             all_ids.add(g["universeId"])
-            master_games.append((int(g["universeId"]), g["name"]))
-
+            master.append((int(g["universeId"]), g["name"]))
     if not all_ids:
-        print("No games found; exiting this run.")
-        return
+        print("No games found") ; return
+    all_list=list(all_ids)
+    meta_all=get_game_details(all_list)
+    votes   =get_game_votes(all_list)
+    icons   =fetch_icons(all_list)
+    thumbs  =fetch_thumbnails(all_list)
 
-    all_list = list(all_ids)
-    meta     = get_game_details(all_list)
-    votes    = get_game_votes(all_list)
-    icons    = fetch_icons(all_list)
-    thumbs   = fetch_thumbnails(all_list)
+    upsert_games(master)
 
-    # upsert master games
-    upsert_games(master_games)
-
-    # build snapshots
-    snaps = []
-    for g in meta:
-        uid = str(g.get("universeId") or g.get("id"))
+    snaps=[]
+    for g in meta_all:
+        uid=str(g.get("universeId") or g.get("id"))
         snaps.append((
             int(uid),
             g.get("playing",0),
@@ -416,15 +349,12 @@ def scrape_and_snapshot():
             thumbs.get(uid),
         ))
     save_snapshots(snaps)
-
-    # prune any that disappeared
     prune_stale([int(x) for x in all_list])
-
     print(f"🕒 {len(all_list)} games snapped at {datetime.utcnow()}")
 
 def main():
+    ensure_tables()
     scrape_and_snapshot()
 
 if __name__=="__main__":
     main()
-
