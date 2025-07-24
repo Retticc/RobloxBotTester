@@ -319,29 +319,21 @@ def fetch_icons(universe_ids):
     return icons
 
 def fetch_thumbnails(universe_ids):
-    print(f"[fetch_thumbnails] total IDs={len(universe_ids)}, batches of {BATCH_SIZE}")
+    """
+    Instead of using the thumbnails.roblox.com API (which is returning 404s for a lot of placeIds),
+    we just construct the “asset-thumbnail-redirect” URL directly for each universeId.
+    """
     thumbs = {}
-    os.makedirs("thumbnails", exist_ok=True)
-    def chunk(ids):
-        s = ",".join(ids)
-        url = f"https://thumbnails.roblox.com/v1/games/thumbnails?universeIds={s}&size=768x432&format=Png"
-        try:
-            data = safe_get(url).get("data",[])
-            print(f"[fetch_thumbnails]   got {len(data)} URLs")
-            return { str(e["targetId"]): e["imageUrl"] for e in data }
-        except Exception as e:
-            if len(ids)==1:
-                print(f"[fetch_thumbnails]    skip {ids[0]}: {e}")
-                return {}
-            m = len(ids)//2
-            left  = chunk(ids[:m])
-            right = chunk(ids[m:])
-            left.update(right)
-            return left
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        print(f"[fetch_thumbnails] batch {i//BATCH_SIZE+1}")
-        thumbs.update(chunk(universe_ids[i:i+BATCH_SIZE]))
+    for uid in universe_ids:
+        # Build the redirect URL—Roblox will 302 you to the current thumbnail image
+        url = (
+            "https://www.roblox.com/asset-thumbnail-redirect?"
+            f"assetId={uid}&width=768&height=432&format=png"
+        )
+        thumbs[str(uid)] = url
+        print(f"[fetch_thumbnails]  → using redirect URL for {uid}: {url}")
     return thumbs
+
 
 # ─── Main scrape + snapshot + prune ────────────────────────────────────────────
 def scrape_and_snapshot():
