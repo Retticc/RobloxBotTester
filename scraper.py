@@ -395,6 +395,7 @@ def scrape_and_snapshot():
         print("[main] No games found; exiting.")
         return
 
+    # Fetch all the data
     meta   = get_game_details(all_list)
     votes  = get_game_votes(all_list)
     icons  = fetch_icons(all_list)
@@ -409,49 +410,47 @@ def scrape_and_snapshot():
     # Download & snapshot
     snaps = []
     os.makedirs("thumbnails", exist_ok=True)
-    # Replace the thumbnail download section in scrape_and_snapshot()
-# This goes in the loop where you process each game in meta:
+    os.makedirs("icons", exist_ok=True)
+    
+    for g in meta:
+        uid       = str(g.get("universeId") or g.get("id"))
+        icon_url  = icons.get(uid)
+        thumb_url = thumbs.get(uid)
+        icon_path = thumb_path = None
 
-for g in meta:
-    uid       = str(g.get("universeId") or g.get("id"))
-    icon_url  = icons.get(uid)
-    thumb_url = thumbs.get(uid)
-    icon_path = thumb_path = None
-
-    # Icon download (your existing code is fine)
-    if icon_url:
-        try:
-            icon_path = f"icons/{uid}.png"
-            with requests.get(icon_url, stream=True, timeout=30) as r:
-                r.raise_for_status()
-                with open(icon_path, "wb") as f:
-                    for chunk in r.iter_content(1024):
-                        f.write(chunk)
-            print(f"[download] ✓ saved icon for {uid}")
-        except Exception as e:
-            print(f"[download] ⚠ failed to download icon for {uid}: {e!r}")
-            icon_path = None
-
-    # Improved thumbnail download
-    if thumb_url and thumb_url.strip():  # Check if URL is not empty
-        try:
-            thumb_path = f"thumbnails/{uid}.png"
-            print(f"[download] downloading thumbnail for {uid}: {thumb_url}")
-            with requests.get(thumb_url, stream=True, timeout=30) as r:
-                r.raise_for_status()
-                with open(thumb_path, "wb") as f:
-                    for chunk in r.iter_content(1024):
-                        if chunk:  # filter out keep-alive chunks
+        # Icon download
+        if icon_url:
+            try:
+                icon_path = f"icons/{uid}.png"
+                with requests.get(icon_url, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    with open(icon_path, "wb") as f:
+                        for chunk in r.iter_content(1024):
                             f.write(chunk)
-            print(f"[download] ✓ saved thumbnail for {uid}")
-        except Exception as e:
-            print(f"[download] ⚠ failed to download thumbnail for {uid}: {e!r}")
-            thumb_path = None
-    else:
-        print(f"[download] ⚠ no thumbnail URL available for {uid}")
+                print(f"[download] ✓ saved icon for {uid}")
+            except Exception as e:
+                print(f"[download] ⚠ failed to download icon for {uid}: {e!r}")
+                icon_path = None
 
-    # Rest of your snapshot code...
+        # Improved thumbnail download
+        if thumb_url and thumb_url.strip():  # Check if URL is not empty
+            try:
+                thumb_path = f"thumbnails/{uid}.png"
+                print(f"[download] downloading thumbnail for {uid}: {thumb_url}")
+                with requests.get(thumb_url, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    with open(thumb_path, "wb") as f:
+                        for chunk in r.iter_content(1024):
+                            if chunk:  # filter out keep-alive chunks
+                                f.write(chunk)
+                print(f"[download] ✓ saved thumbnail for {uid}")
+            except Exception as e:
+                print(f"[download] ⚠ failed to download thumbnail for {uid}: {e!r}")
+                thumb_path = None
+        else:
+            print(f"[download] ⚠ no thumbnail URL available for {uid}")
 
+        # Create snapshot record
         snaps.append((
             int(uid),
             g.get("playing",0),
