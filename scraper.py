@@ -91,30 +91,92 @@ def scrape_and_snapshot():
     master_games = []
 
     for uid in CREATORS:
-        own = []  # Replace with fetch_creator_games(uid)
-        groups = []  # Replace with fetch_user_groups(uid)
-        grp = []     # Replace with fetch_group_games()
+        print(f"[main] Processing creator: {uid}")
+        
+        # Actually call the API functions instead of empty lists
+        own = fetch_creator_games(uid)  # This was []
+        groups = fetch_user_groups(uid)  # This was []
+        
+        grp = []
+        for group_id in groups:
+            group_games = fetch_group_games(group_id)  # This was missing
+            grp.extend(group_games)
+        
+        print(f"[main] Creator {uid}: {len(own)} own games, {len(grp)} group games")
+        
+        # Process all games (own + group games)
         for g in own + grp:
-            all_ids.add(g["universeId"])
-            master_games.append((int(g["universeId"]), g["name"]))
+            universe_id = g["universeId"]
+            all_ids.add(universe_id)
+            master_games.append((int(universe_id), g["name"]))
 
+    print(f"[main] Found {len(master_games)} entries ({len(all_ids)} unique)")
     all_list = list(all_ids)
     if not all_list:
         print("[main] No games found; exiting.")
         return
 
-    meta = []     # Replace with get_game_details(all_list)
-    votes = {}    # Replace with get_game_votes(all_list)
-    icons = {}    # Replace with fetch_icons(all_list)
-    thumbs = {}   # Replace with fetch_thumbnails(all_list)
+    # Actually call the API functions instead of empty placeholders
+    print("[main] Fetching game details...")
+    meta = get_game_details(all_list)  # This was []
+    
+    print("[main] Fetching game votes...")
+    votes = get_game_votes(all_list)   # This was {}
+    
+    print("[main] Fetching game icons...")
+    icons = fetch_icons(all_list)      # This was {}
+    
+    print("[main] Fetching game thumbnails...")
+    thumbs = fetch_thumbnails(all_list)  # This was {}
 
+    # Dedupe before upsert
     unique_map = {gid: name for gid, name in master_games}
     deduped = list(unique_map.items())
+    print(f"[main] Deduped to {len(deduped)} unique games")
     upsert_games(deduped)
 
+    # Create snapshots
     snaps = []
+    os.makedirs("thumbnails", exist_ok=True)
+    os.makedirs("icons", exist_ok=True)
+    
     for g in meta:
         uid = str(g.get("universeId") or g.get("id"))
+        icon_url = icons.get(uid)
+        thumb_url = thumbs.get(uid)
+        icon_path = thumb_path = None
+
+        # Download icon if available
+        if icon_url:
+            try:
+                icon_path = f"icons/{uid}.png"
+                with requests.get(icon_url, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    with open(icon_path, "wb") as f:
+                        for chunk in r.iter_content(1024):
+                            f.write(chunk)
+                print(f"[download] ✓ saved icon for {uid}")
+            except Exception as e:
+                print(f"[download] ⚠ failed to download icon for {uid}: {e!r}")
+                icon_path = None
+
+        # Download thumbnail if available
+        if thumb_url and thumb_url.strip():
+            try:
+                thumb_path = f"thumbnails/{uid}.png"
+                print(f"[download] downloading thumbnail for {uid}")
+                with requests.get(thumb_url, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    with open(thumb_path, "wb") as f:
+                        for chunk in r.iter_content(1024):
+                            if chunk:
+                                f.write(chunk)
+                print(f"[download] ✓ saved thumbnail for {uid}")
+            except Exception as e:
+                print(f"[download] ⚠ failed to download thumbnail for {uid}: {e!r}")
+                thumb_path = None
+
+        # Create snapshot record
         snaps.append((
             int(uid),
             g.get("playing", 0),
@@ -122,14 +184,14 @@ def scrape_and_snapshot():
             g.get("favoritedCount", 0),
             votes.get(uid, {}).get("upVotes", 0),
             votes.get(uid, {}).get("downVotes", 0),
-            icons.get(uid),
-            thumbs.get(uid)
+            icon_path,
+            thumb_path,
         ))
 
     save_snapshots(snaps)
     prune_stale([int(x) for x in all_list])
-    print(f"[main] Scrape complete at {datetime.utcnow()}")
-
+    print(f"[main] 🕒 Completed {len(all_list)} games at {datetime.utcnow()}")
+    
 def main():
     ensure_tables()
     scrape_and_snapshot()
