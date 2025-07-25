@@ -58,35 +58,84 @@ def get_conn():
 
 def ensure_tables():
     print("[db] Ensuring tables exist…")
-    ddl = """
-    CREATE TABLE IF NOT EXISTS games (
-      id   BIGINT PRIMARY KEY,
-      name TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS snapshots (
-      game_id       BIGINT      NOT NULL,
-      snapshot_time TIMESTAMP   NOT NULL DEFAULT NOW(),
-      playing       INTEGER     NOT NULL,
-      visits        BIGINT      NOT NULL,
-      favorites     INTEGER     NOT NULL,
-      likes         INTEGER     NOT NULL,
-      dislikes      INTEGER     NOT NULL,
-      icon_data     BYTEA,
-      thumbnail_data BYTEA,
-      PRIMARY KEY (game_id, snapshot_time)
-    );
-    CREATE TABLE IF NOT EXISTS processing_checkpoint (
-      id            SERIAL PRIMARY KEY,
-      run_timestamp TIMESTAMP NOT NULL DEFAULT NOW(),
-      processed_games INTEGER NOT NULL,
-      total_games   INTEGER NOT NULL,
-      status        TEXT NOT NULL,
-      last_game_id  BIGINT
-    );
-    """
+    
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(ddl)
+            # Create games table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS games (
+                  id   BIGINT PRIMARY KEY,
+                  name TEXT NOT NULL
+                );
+            """)
+            
+            # Create processing_checkpoint table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS processing_checkpoint (
+                  id            SERIAL PRIMARY KEY,
+                  run_timestamp TIMESTAMP NOT NULL DEFAULT NOW(),
+                  processed_games INTEGER NOT NULL,
+                  total_games   INTEGER NOT NULL,
+                  status        TEXT NOT NULL,
+                  last_game_id  BIGINT
+                );
+            """)
+            
+            # Check if snapshots table exists and what columns it has
+            cur.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'snapshots'
+            """)
+            existing_columns = {row[0] for row in cur.fetchall()}
+            
+            if not existing_columns:
+                # Fresh table - create with BYTEA columns
+                print("[db] Creating new snapshots table with BYTEA columns...")
+                cur.execute("""
+                    CREATE TABLE snapshots (
+                      game_id       BIGINT      NOT NULL,
+                      snapshot_time TIMESTAMP   NOT NULL DEFAULT NOW(),
+                      playing       INTEGER     NOT NULL,
+                      visits        BIGINT      NOT NULL,
+                      favorites     INTEGER     NOT NULL,
+                      likes         INTEGER     NOT NULL,
+                      dislikes      INTEGER     NOT NULL,
+                      icon_data     BYTEA,
+                      thumbnail_data BYTEA,
+                      PRIMARY KEY (game_id, snapshot_time)
+                    );
+                """)
+            else:
+                # Table exists - check if it needs migration
+                has_old_columns = 'icon_url' in existing_columns or 'thumbnail_url' in existing_columns
+                has_new_columns = 'icon_data' in existing_columns and 'thumbnail_data' in existing_columns
+                
+                if has_old_columns and not has_new_columns:
+                    print("[db] Migrating snapshots table to BYTEA columns...")
+                    
+                    # Add new BYTEA columns
+                    if 'icon_data' not in existing_columns:
+                        cur.execute("ALTER TABLE snapshots ADD COLUMN icon_data BYTEA;")
+                    if 'thumbnail_data' not in existing_columns:
+                        cur.execute("ALTER TABLE snapshots ADD COLUMN thumbnail_data BYTEA;")
+                    
+                    # Remove old URL columns
+                    if 'icon_url' in existing_columns:
+                        cur.execute("ALTER TABLE snapshots DROP COLUMN icon_url;")
+                    if 'thumbnail_url' in existing_columns:
+                        cur.execute("ALTER TABLE snapshots DROP COLUMN thumbnail_url;")
+                    
+                    print("[db] Migration completed automatically")
+                
+                elif not has_new_columns:
+                    # Missing BYTEA columns - add them
+                    print("[db] Adding missing BYTEA columns...")
+                    if 'icon_data' not in existing_columns:
+                        cur.execute("ALTER TABLE snapshots ADD COLUMN icon_data BYTEA;")
+                    if 'thumbnail_data' not in existing_columns:
+                        cur.execute("ALTER TABLE snapshots ADD COLUMN thumbnail_data BYTEA;")
+        
         conn.commit()
     print("[db] Tables ready.")
 
