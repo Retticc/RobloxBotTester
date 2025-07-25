@@ -47,8 +47,8 @@ def ensure_tables():
       favorites     INTEGER     NOT NULL,
       likes         INTEGER     NOT NULL,
       dislikes      INTEGER     NOT NULL,
-      icon_url      TEXT,
-      thumbnail_url TEXT,
+      icon_data     BYTEA,
+      thumbnail_data BYTEA,
       PRIMARY KEY (game_id, snapshot_time)
     );
     """
@@ -74,7 +74,7 @@ def save_snapshots(snaps):
     print(f"[db] Saving {len(snaps)} snapshots…")
     sql = """
     INSERT INTO snapshots
-      (game_id, playing, visits, favorites, likes, dislikes, icon_url, thumbnail_url)
+      (game_id, playing, visits, favorites, likes, dislikes, icon_data, thumbnail_data)
     VALUES %s
     """
     with get_conn() as conn:
@@ -203,6 +203,42 @@ def safe_post(url, json=None, retries=3):
             last_err = e
     raise RuntimeError(f"POST failed after {retries} attempts: {url!r}\nLast error: {last_err!r}")
 
+def download_image(url, retries=3):
+    """Download image and return binary data"""
+    last_err = None
+    for attempt in range(1, retries+1):
+        time.sleep(RATE_LIMIT_DELAY + random.random()*0.2)
+        sess = get_session()
+        proxy = sess.proxies.get("https") or sess.proxies.get("http") or "direct"
+        print(f"[download_image] try #{attempt} → GET {url} via {proxy}")
+        try:
+            r = sess.get(
+                url,
+                headers={"User-Agent": get_user_agent()},
+                cookies=get_cookie(),
+                timeout=30,
+                stream=True
+            )
+            r.raise_for_status()
+            image_data = b""
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    image_data += chunk
+            print(f"[download_image]  ✓ success, downloaded {len(image_data)} bytes")
+            return image_data
+        except (ProxyConnectionError, ReqConnError) as e:
+            print(f"[download_image]  proxy error: {e!r}")
+            if proxy != "direct" and proxy in PROXIES:
+                PROXIES.remove(proxy)
+            if PROXIES:
+                continue
+            sess.proxies.clear()
+        except Exception as e:
+            print(f"[download_image]  error: {e!r}")
+            last_err = e
+    print(f"[download_image] Download failed after {retries} attempts: {url!r}")
+    return None
+
 # ─── Roblox endpoints ─────────────────────────────────────────────────────────
 def fetch_creator_games(user_id):
     print(f"[fetch_creator_games] user={user_id}")
@@ -299,7 +335,6 @@ def get_game_votes(universe_ids):
 def fetch_icons(universe_ids):
     print(f"[fetch_icons] total IDs={len(universe_ids)}, batches of {BATCH_SIZE}")
     icons = {}
-    os.makedirs("icons", exist_ok=True)
     for i in range(0, len(universe_ids), BATCH_SIZE):
         batch = universe_ids[i:i+BATCH_SIZE]
         s     = ",".join(batch)
@@ -317,7 +352,6 @@ def fetch_icons(universe_ids):
 def fetch_thumbnails(universe_ids):
     print(f"[fetch_thumbnails] total IDs={len(universe_ids)}, batches of {BATCH_SIZE}")
     thumbs = {}
-    os.makedirs("thumbnails", exist_ok=True)
 
     def fetch_batch(batch):
         s = ",".join(batch)
@@ -413,44 +447,36 @@ def scrape_and_snapshot():
 
     # Download & snapshot
     snaps = []
-    os.makedirs("thumbnails", exist_ok=True)
-    os.makedirs("icons", exist_ok=True)
     
     for g in meta:
         uid       = str(g.get("universeId") or g.get("id"))
         icon_url  = icons.get(uid)
         thumb_url = thumbs.get(uid)
-        icon_path = thumb_path = None
+        icon_data = thumb_data = None
 
         # Icon download
         if icon_url:
             try:
-                icon_path = f"icons/{uid}.png"
-                with requests.get(icon_url, stream=True, timeout=30) as r:
-                    r.raise_for_status()
-                    with open(icon_path, "wb") as f:
-                        for chunk in r.iter_content(1024):
-                            f.write(chunk)
-                print(f"[download] ✓ saved icon for {uid}")
+                icon_data = download_image(icon_url)
+                if icon_data:
+                    print(f"[download] ✓ downloaded icon for {uid} ({len(icon_data)} bytes)")
+                else:
+                    print(f"[download] ⚠ failed to download icon for {uid}")
             except Exception as e:
-                print(f"[download] ⚠ failed to download icon for {uid}: {e!r}")
-                icon_path = None
+                print(f"[download] ⚠ exception downloading icon for {uid}: {e!r}")
+                icon_data = None
 
-        # Improved thumbnail download
+        # Thumbnail download
         if thumb_url and thumb_url.strip():
             try:
-                thumb_path = f"thumbnails/{uid}.png"
-                print(f"[download] downloading thumbnail for {uid}: {thumb_url}")
-                with requests.get(thumb_url, stream=True, timeout=30) as r:
-                    r.raise_for_status()
-                    with open(thumb_path, "wb") as f:
-                        for chunk in r.iter_content(1024):
-                            if chunk:
-                                f.write(chunk)
-                print(f"[download] ✓ saved thumbnail for {uid}")
+                thumb_data = download_image(thumb_url)
+                if thumb_data:
+                    print(f"[download] ✓ downloaded thumbnail for {uid} ({len(thumb_data)} bytes)")
+                else:
+                    print(f"[download] ⚠ failed to download thumbnail for {uid}")
             except Exception as e:
-                print(f"[download] ⚠ failed to download thumbnail for {uid}: {e!r}")
-                thumb_path = None
+                print(f"[download] ⚠ exception downloading thumbnail for {uid}: {e!r}")
+                thumb_data = None
         else:
             print(f"[download] ⚠ no thumbnail URL available for {uid}")
 
@@ -462,15 +488,14 @@ def scrape_and_snapshot():
             g.get("favoritedCount", 0),
             votes.get(uid, {}).get("upVotes", 0),
             votes.get(uid, {}).get("downVotes", 0),
-            icon_path,
-            thumb_path,
+            icon_data,
+            thumb_data,
         )
-        print(f"[snapshot] Prepared snapshot for {uid}: {snap}")
+        print(f"[snapshot] Prepared snapshot for {uid}: playing={snap[1]}, visits={snap[2]}, "
+              f"icon_size={len(icon_data) if icon_data else 0}, thumb_size={len(thumb_data) if thumb_data else 0}")
         snaps.append(snap)
 
     print(f"[main] Created {len(snaps)} snapshot entries.")
-    if snaps:
-        print(f"[main] First snapshot example: {snaps[0]}")
 
     save_snapshots(snaps)
     prune_stale([int(x) for x in all_list])
