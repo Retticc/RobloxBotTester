@@ -13,6 +13,10 @@ import gc
 import sys
 import traceback
 from typing import List, Dict, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+import queue
+import threading
 
 load_dotenv()
 
@@ -21,24 +25,34 @@ DATABASE_URL         = os.getenv("DATABASE_URL")
 CREATORS            = [u.strip() for u in os.getenv("TARGET_CREATORS","").split(",") if u.strip()]
 TOKENS              = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS","").split(",") if t.strip()]
 MAX_IDS_PER_REQ     = 100
-env_batch           = int(os.getenv("BATCH_SIZE","50"))  # Reduced default batch size
+env_batch           = int(os.getenv("BATCH_SIZE","50"))
 BATCH_SIZE          = max(1, min(env_batch, MAX_IDS_PER_REQ))
-RATE_LIMIT_DELAY    = float(os.getenv("RATE_LIMIT_DELAY","1.0"))  # Increased delay
+RATE_LIMIT_DELAY    = float(os.getenv("RATE_LIMIT_DELAY","0.5"))  # Reduced for multi-threading
 PROXY_API_KEY       = os.getenv("PROXY_API_KEY","")
 PROXY_API_BASE      = os.getenv("PROXY_API_BASE","https://proxy-ipv4.com/client-api/v1")
 PROXY_URLS_FALLBACK = [p.strip() for p in os.getenv("PROXY_URLS","").split(",") if p.strip()]
 
-# New configuration for robustness
-CHECKPOINT_FREQUENCY = int(os.getenv("CHECKPOINT_FREQUENCY", "50"))  # Save progress every N games
-MAX_IMAGE_SIZE_MB   = int(os.getenv("MAX_IMAGE_SIZE_MB", "10"))     # Skip images larger than this
+# Multi-threading configuration
+MAX_WORKERS         = int(os.getenv("MAX_WORKERS", "8"))  # Number of concurrent threads
+IMAGE_WORKERS       = int(os.getenv("IMAGE_WORKERS", "4"))  # Separate pool for image downloads
+API_WORKERS         = int(os.getenv("API_WORKERS", "6"))    # Separate pool for API calls
+
+# Existing configuration
+CHECKPOINT_FREQUENCY = int(os.getenv("CHECKPOINT_FREQUENCY", "100"))
+MAX_IMAGE_SIZE_MB   = int(os.getenv("MAX_IMAGE_SIZE_MB", "10"))
 RESUME_FROM_CHECKPOINT = os.getenv("RESUME_FROM_CHECKPOINT", "false").lower() == "true"
-SKIP_IMAGES         = os.getenv("SKIP_IMAGES", "false").lower() == "true"  # Option to skip image downloads
+SKIP_IMAGES         = os.getenv("SKIP_IMAGES", "false").lower() == "true"
+
+# Thread-safe counters and locks
+progress_lock = Lock()
+processed_count = 0
+total_count = 0
 
 print(f"[startup] batch size={BATCH_SIZE}, rate_delay={RATE_LIMIT_DELAY}")
+print(f"[startup] workers: api={API_WORKERS}, images={IMAGE_WORKERS}, max={MAX_WORKERS}")
 print(f"[startup] checkpoint_freq={CHECKPOINT_FREQUENCY}, max_image_mb={MAX_IMAGE_SIZE_MB}")
-print(f"[startup] resume_from_checkpoint={RESUME_FROM_CHECKPOINT}, skip_images={SKIP_IMAGES}")
 
-# ─── Database Helpers ──────────────────────────────────────────────────────────
+# ─── Thread-safe Database Helpers ─────────────────────────────────────────────
 def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
@@ -77,7 +91,7 @@ def ensure_tables():
     print("[db] Tables ready.")
 
 def save_checkpoint(processed: int, total: int, status: str, last_game_id: Optional[int] = None):
-    """Save processing checkpoint for resume capability"""
+    """Thread-safe checkpoint saving"""
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -90,129 +104,36 @@ def save_checkpoint(processed: int, total: int, status: str, last_game_id: Optio
     except Exception as e:
         print(f"[checkpoint] Failed to save: {e!r}")
 
-def get_last_checkpoint():
-    """Get the last checkpoint for resume capability"""
+def save_single_snapshot(snap: Tuple):
+    """Save a single snapshot - thread safe"""
+    sql = """
+    INSERT INTO snapshots
+      (game_id, playing, visits, favorites, likes, dislikes, icon_data, thumbnail_data)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (game_id, snapshot_time) DO NOTHING
+    """
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT processed_games, total_games, last_game_id 
-                    FROM processing_checkpoint 
-                    ORDER BY run_timestamp DESC 
-                    LIMIT 1
-                """)
-                row = cur.fetchone()
-                return row if row else (0, 0, None)
-    except Exception as e:
-        print(f"[checkpoint] Failed to get: {e!r}")
-        return (0, 0, None)
-
-def upsert_games(games: List[Tuple[int, str]]):
-    print(f"[db] Upserting {len(games)} games…")
-    if not games:
-        return
-    
-    # Process in smaller chunks to avoid memory issues
-    chunk_size = 100
-    for i in range(0, len(games), chunk_size):
-        chunk = games[i:i+chunk_size]
-        sql = """
-        INSERT INTO games(id,name) VALUES %s
-          ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name
-        """
-        try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    execute_values(cur, sql, chunk)
-                conn.commit()
-        except Exception as e:
-            print(f"[db] Error upserting games chunk {i//chunk_size+1}: {e!r}")
-            # Try individual inserts for this chunk
-            for game_id, name in chunk:
-                try:
-                    with get_conn() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("""
-                                INSERT INTO games(id,name) VALUES (%s,%s)
-                                ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name
-                            """, (game_id, name))
-                        conn.commit()
-                except Exception as e2:
-                    print(f"[db] Failed to insert individual game {game_id}: {e2!r}")
-    print("[db] Upsert complete.")
-
-def save_snapshots_batch(snaps: List[Tuple]):
-    """Save snapshots in smaller batches with error handling"""
-    if not snaps:
-        return
-    
-    print(f"[db] Saving {len(snaps)} snapshots in batches…")
-    batch_size = 25  # Smaller batches for BYTEA data
-    
-    for i in range(0, len(snaps), batch_size):
-        batch = snaps[i:i+batch_size]
-        sql = """
-        INSERT INTO snapshots
-          (game_id, playing, visits, favorites, likes, dislikes, icon_data, thumbnail_data)
-        VALUES %s
-        """
-        try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    execute_values(cur, sql, batch)
-                conn.commit()
-            print(f"[db] Saved batch {i//batch_size+1}/{(len(snaps)-1)//batch_size+1}")
-        except Exception as e:
-            print(f"[db] Error saving batch {i//batch_size+1}: {e!r}")
-            # Try individual inserts for this batch
-            for snap in batch:
-                try:
-                    with get_conn() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute(sql.replace('%s', '(%s,%s,%s,%s,%s,%s,%s,%s)'), snap)
-                        conn.commit()
-                except Exception as e2:
-                    print(f"[db] Failed to insert individual snapshot for game {snap[0]}: {e2!r}")
-        
-        # Force garbage collection after each batch
-        gc.collect()
-    
-    print("[db] All snapshots saved.")
-
-def prune_stale(current_ids: List[int]):
-    print(f"[db] Pruning stale IDs not in current set of {len(current_ids)} games…")
-    if not current_ids:
-        return
-    
-    # Process pruning in chunks to avoid SQL parameter limits
-    chunk_size = 1000
-    all_current = set(current_ids)
-    
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                # Get all existing game IDs
-                cur.execute("SELECT DISTINCT game_id FROM snapshots")
-                existing_ids = {row[0] for row in cur.fetchall()}
-                
-                # Find IDs to delete
-                to_delete = existing_ids - all_current
-                print(f"[db] Found {len(to_delete)} stale games to prune")
-                
-                if to_delete:
-                    for i in range(0, len(to_delete), chunk_size):
-                        chunk = list(to_delete)[i:i+chunk_size]
-                        ids = tuple(chunk)
-                        cur.execute("DELETE FROM snapshots WHERE game_id = ANY(%s)", (list(ids),))
-                        cur.execute("DELETE FROM games     WHERE id       = ANY(%s)", (list(ids),))
-                        print(f"[db] Pruned chunk {i//chunk_size+1}")
+                cur.execute(sql, snap)
             conn.commit()
+        return True
     except Exception as e:
-        print(f"[db] Error during pruning: {e!r}")
-    
-    print("[db] Prune complete.")
+        print(f"[db] Error saving snapshot for game {snap[0]}: {e!r}")
+        return False
 
-# ─── Proxy Handling ────────────────────────────────────────────────────────────
+def update_progress():
+    """Thread-safe progress tracking"""
+    global processed_count
+    with progress_lock:
+        processed_count += 1
+        if processed_count % 10 == 0:
+            print(f"[progress] {processed_count}/{total_count} games completed ({processed_count/total_count*100:.1f}%)")
+        
+        if processed_count % CHECKPOINT_FREQUENCY == 0:
+            save_checkpoint(processed_count, total_count, "processing", None)
+
+# ─── Thread-safe HTTP Helpers ─────────────────────────────────────────────────
 def fetch_proxies_from_api():
     if not PROXY_API_KEY:
         return []
@@ -234,16 +155,22 @@ def fetch_proxies_from_api():
     return proxies
 
 PROXIES = fetch_proxies_from_api() or PROXY_URLS_FALLBACK
+proxy_lock = Lock()
 print(f"[proxy] Using {len(PROXIES)} proxies total.")
 
-# ─── HTTP Helpers ─────────────────────────────────────────────────────────────
-_cookie_idx = 0
+# Thread-local storage for cookies
+thread_local = threading.local()
+
 def get_cookie():
-    global _cookie_idx
+    """Thread-safe cookie rotation"""
+    if not hasattr(thread_local, 'cookie_idx'):
+        thread_local.cookie_idx = random.randint(0, len(TOKENS)-1) if TOKENS else 0
+    
     if not TOKENS:
         return {}
-    tok = TOKENS[_cookie_idx % len(TOKENS)]
-    _cookie_idx += 1
+    
+    tok = TOKENS[thread_local.cookie_idx % len(TOKENS)]
+    thread_local.cookie_idx += 1
     return {".ROBLOSECURITY": tok}
 
 def get_user_agent():
@@ -254,51 +181,113 @@ def get_user_agent():
     ])
 
 def get_session():
+    """Thread-safe session with proxy rotation"""
     s = requests.Session()
     if PROXIES:
-        p = random.choice(PROXIES)
+        with proxy_lock:
+            p = random.choice(PROXIES)
         s.proxies.update({"http":p, "https":p})
     return s
 
 def safe_get(url, retries=3):
+    """Thread-safe HTTP GET"""
     last_err = None
     for attempt in range(1, retries+1):
-        time.sleep(RATE_LIMIT_DELAY + random.random()*0.3)
-        sess  = get_session()
-        proxy = sess.proxies.get("https") or sess.proxies.get("http") or "direct"
+        # Randomized delay to spread out requests
+        time.sleep(RATE_LIMIT_DELAY + random.random()*0.5)
+        sess = get_session()
         
         try:
             r = sess.get(
                 url,
                 headers={"User-Agent": get_user_agent(), "Accept": "application/json"},
                 cookies=get_cookie(),
-                timeout=45  # Increased timeout
+                timeout=30
             )
             r.raise_for_status()
             return r.json()
         except (ProxyConnectionError, ReqConnError) as e:
-            print(f"[safe_get] proxy error (attempt {attempt}): {e!r}")
+            proxy = sess.proxies.get("https") or sess.proxies.get("http") or "direct"
             if proxy != "direct" and proxy in PROXIES:
-                PROXIES.remove(proxy)
-            if not PROXIES:
-                sess.proxies.clear()
+                with proxy_lock:
+                    if proxy in PROXIES:
+                        PROXIES.remove(proxy)
         except Exception as e:
-            print(f"[safe_get] error (attempt {attempt}): {e!r}")
             last_err = e
         
-        # Exponential backoff
         if attempt < retries:
-            time.sleep(2 ** attempt)
+            time.sleep((2 ** attempt) + random.random())
     
     raise RuntimeError(f"GET failed after {retries} attempts: {url!r}\nLast error: {last_err!r}")
 
-def download_image(url, retries=3):
-    """Download image and return binary data with size limits and auto-resize"""
+def resize_image_to_limit(image_data, max_size_bytes):
+    """Resize image by reducing resolution until it fits within size limit"""
+    try:
+        from PIL import Image
+        from io import BytesIO
+        
+        img = Image.open(BytesIO(image_data))
+        original_size = img.size
+        
+        resize_attempts = [
+            (1.0, 85), (1.0, 70), (1.0, 50),
+            (0.8, 85), (0.8, 70),
+            (0.6, 85), (0.6, 70),
+            (0.5, 85), (0.5, 70),
+            (0.4, 85), (0.3, 85), (0.2, 85),
+        ]
+        
+        for scale, quality in resize_attempts:
+            try:
+                new_width = int(original_size[0] * scale)
+                new_height = int(original_size[1] * scale)
+                
+                if new_width < 50 or new_height < 50:
+                    continue
+                
+                if scale < 1.0:
+                    resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                else:
+                    resized_img = img
+                
+                output = BytesIO()
+                
+                if img.format == 'PNG' and quality < 100:
+                    if resized_img.mode in ("RGBA", "LA", "P"):
+                        background = Image.new("RGB", resized_img.size, (255, 255, 255))
+                        if resized_img.mode == "P":
+                            resized_img = resized_img.convert("RGBA")
+                        background.paste(resized_img, mask=resized_img.split()[-1] if resized_img.mode == "RGBA" else None)
+                        resized_img = background
+                    resized_img.save(output, format='JPEG', quality=quality, optimize=True)
+                elif img.format == 'JPEG' or quality < 100:
+                    resized_img.save(output, format='JPEG', quality=quality, optimize=True)
+                else:
+                    resized_img.save(output, format=img.format or 'PNG', optimize=True)
+                
+                output_data = output.getvalue()
+                
+                if len(output_data) <= max_size_bytes:
+                    return output_data
+                
+            except Exception:
+                continue
+        
+        return None
+        
+    except ImportError:
+        print("[resize_image] ⚠ PIL not available, cannot resize images")
+        return None
+    except Exception as e:
+        print(f"[resize_image] ⚠ Resize failed: {e!r}")
+        return None
+
+def download_image(url, retries=2):
+    """Thread-safe image download with auto-resize"""
     if SKIP_IMAGES:
         return None
         
-    last_err = None
-    max_size = MAX_IMAGE_SIZE_MB * 1024 * 1024  # Convert to bytes
+    max_size = MAX_IMAGE_SIZE_MB * 1024 * 1024
     
     for attempt in range(1, retries+1):
         time.sleep(RATE_LIMIT_DELAY + random.random()*0.3)
@@ -309,134 +298,239 @@ def download_image(url, retries=3):
                 url,
                 headers={"User-Agent": get_user_agent()},
                 cookies=get_cookie(),
-                timeout=45,
+                timeout=30,
                 stream=True
             )
             r.raise_for_status()
             
-            # Download the full image first
             image_data = b""
             for chunk in r.iter_content(chunk_size=8192):
                 if chunk:
                     image_data += chunk
             
-            print(f"[download_image] Downloaded {len(image_data)} bytes")
-            
-            # If image is within size limit, return as-is
             if len(image_data) <= max_size:
-                print(f"[download_image] ✓ Image within size limit")
                 return image_data
             
-            # Image is too large, try to resize it
-            print(f"[download_image] Image too large ({len(image_data)} bytes), attempting resize...")
+            # Try to resize if too large
             resized_data = resize_image_to_limit(image_data, max_size)
-            
-            if resized_data:
-                print(f"[download_image] ✓ Resized to {len(resized_data)} bytes")
-                return resized_data
-            else:
-                print(f"[download_image] ⚠ Could not resize image to acceptable size")
-                return None
+            return resized_data
             
         except Exception as e:
-            print(f"[download_image] Error (attempt {attempt}): {e!r}")
-            last_err = e
+            if attempt == retries:
+                print(f"[download_image] Failed: {e!r}")
             
         if attempt < retries:
-            time.sleep(2 ** attempt)
+            time.sleep(1)
     
-    print(f"[download_image] Failed after {retries} attempts: {last_err!r}")
     return None
 
-def resize_image_to_limit(image_data, max_size_bytes):
-    """Resize image by reducing resolution until it fits within size limit"""
+# ─── Multi-threaded Processing Functions ──────────────────────────────────────
+def process_single_game(game_data):
+    """Process a single game - this runs in parallel"""
+    game_id, game_meta, votes_dict, icons_dict, thumbs_dict = game_data
+    
     try:
-        from PIL import Image
-        from io import BytesIO
+        uid = str(game_id)
+        icon_data = thumb_data = None
         
-        # Load image from binary data
-        img = Image.open(BytesIO(image_data))
-        original_size = img.size
-        print(f"[resize_image] Original size: {original_size[0]}x{original_size[1]}")
+        # Download images concurrently if available
+        if not SKIP_IMAGES:
+            icon_futures = []
+            thumb_futures = []
+            
+            with ThreadPoolExecutor(max_workers=2) as img_executor:
+                if icon_url := icons_dict.get(uid):
+                    icon_futures.append(img_executor.submit(download_image, icon_url))
+                
+                if thumb_url := thumbs_dict.get(uid):
+                    thumb_futures.append(img_executor.submit(download_image, thumb_url))
+                
+                # Get results
+                if icon_futures:
+                    icon_data = icon_futures[0].result()
+                if thumb_futures:
+                    thumb_data = thumb_futures[0].result()
         
-        # Try different quality and resolution combinations
-        resize_attempts = [
-            # (scale_factor, quality)
-            (1.0, 85),    # Reduce quality first
-            (1.0, 70),    # Lower quality
-            (1.0, 50),    # Even lower quality
-            (0.8, 85),    # 80% size, good quality
-            (0.8, 70),    # 80% size, medium quality
-            (0.6, 85),    # 60% size, good quality
-            (0.6, 70),    # 60% size, medium quality
-            (0.5, 85),    # 50% size, good quality
-            (0.5, 70),    # 50% size, medium quality
-            (0.4, 85),    # 40% size, good quality
-            (0.3, 85),    # 30% size, good quality
-            (0.2, 85),    # 20% size, good quality
-        ]
+        # Create snapshot
+        snap = (
+            int(uid),
+            game_meta.get("playing", 0),
+            game_meta.get("visits", 0),
+            game_meta.get("favoritedCount", 0),
+            votes_dict.get(uid, {}).get("upVotes", 0),
+            votes_dict.get(uid, {}).get("downVotes", 0),
+            icon_data,
+            thumb_data,
+        )
         
-        for scale, quality in resize_attempts:
-            try:
-                # Calculate new dimensions
-                new_width = int(original_size[0] * scale)
-                new_height = int(original_size[1] * scale)
-                
-                # Skip if image would be too small
-                if new_width < 50 or new_height < 50:
-                    continue
-                
-                # Resize image
-                if scale < 1.0:
-                    resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                else:
-                    resized_img = img
-                
-                # Convert to bytes with specified quality
-                output = BytesIO()
-                
-                # Handle different image formats
-                if img.format == 'PNG' and quality < 100:
-                    # Convert PNG to JPEG for better compression when reducing quality
-                    if resized_img.mode in ("RGBA", "LA", "P"):
-                        # Create white background for transparent images
-                        background = Image.new("RGB", resized_img.size, (255, 255, 255))
-                        if resized_img.mode == "P":
-                            resized_img = resized_img.convert("RGBA")
-                        background.paste(resized_img, mask=resized_img.split()[-1] if resized_img.mode == "RGBA" else None)
-                        resized_img = background
-                    resized_img.save(output, format='JPEG', quality=quality, optimize=True)
-                elif img.format == 'JPEG' or quality < 100:
-                    resized_img.save(output, format='JPEG', quality=quality, optimize=True)
-                else:
-                    # Keep original format for high quality
-                    resized_img.save(output, format=img.format or 'PNG', optimize=True)
-                
-                output_data = output.getvalue()
-                output_size = len(output_data)
-                
-                print(f"[resize_image] Attempt {scale:.1f}x scale, {quality}% quality: {new_width}x{new_height} = {output_size} bytes")
-                
-                # Check if this version fits
-                if output_size <= max_size_bytes:
-                    print(f"[resize_image] ✓ Success: {original_size[0]}x{original_size[1]} → {new_width}x{new_height} ({len(image_data)} → {output_size} bytes)")
-                    return output_data
-                
-            except Exception as resize_error:
-                print(f"[resize_image] Error with scale {scale}, quality {quality}: {resize_error!r}")
-                continue
+        # Save to database
+        success = save_single_snapshot(snap)
+        if success:
+            update_progress()
         
-        print(f"[resize_image] ⚠ Could not resize image below {max_size_bytes} bytes")
-        return None
+        return success
         
-    except ImportError:
-        print("[resize_image] ⚠ PIL not available, cannot resize images")
-        return None
     except Exception as e:
-        print(f"[resize_image] ⚠ Resize failed: {e!r}")
-        return None
+        print(f"[process_game] Error processing game {game_id}: {e!r}")
+        return False
 
-# ─── Roblox endpoints (unchanged but with better error handling) ───────────────
+def fetch_batch_data(universe_ids):
+    """Fetch all data for a batch of universe IDs using concurrent requests"""
+    print(f"[fetch_batch] Processing {len(universe_ids)} games with {API_WORKERS} workers")
+    
+    # Prepare API calls
+    api_calls = [
+        ("details", universe_ids),
+        ("votes", universe_ids),
+        ("icons", universe_ids),
+        ("thumbnails", universe_ids),
+    ]
+    
+    results = {}
+    
+    def fetch_api_type(call_data):
+        api_type, ids = call_data
+        try:
+            if api_type == "details":
+                return api_type, get_game_details_concurrent(ids)
+            elif api_type == "votes":
+                return api_type, get_game_votes_concurrent(ids)
+            elif api_type == "icons":
+                return api_type, fetch_icons_concurrent(ids)
+            elif api_type == "thumbnails":
+                return api_type, fetch_thumbnails_concurrent(ids)
+        except Exception as e:
+            print(f"[fetch_batch] Error fetching {api_type}: {e!r}")
+            return api_type, {} if api_type in ["votes", "icons", "thumbnails"] else []
+    
+    # Execute API calls concurrently
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_type = {executor.submit(fetch_api_type, call): call[0] for call in api_calls}
+        
+        for future in as_completed(future_to_type):
+            api_type, data = future.result()
+            results[api_type] = data
+    
+    return results
+
+def get_game_details_concurrent(universe_ids):
+    """Concurrent version of get_game_details"""
+    def fetch_chunk(ids):
+        s = ",".join(ids)
+        url = f"https://games.roblox.com/v1/games?universeIds={s}"
+        try:
+            return safe_get(url).get("data", [])
+        except Exception:
+            if len(ids) == 1:
+                return []
+            m = len(ids) // 2
+            return fetch_chunk(ids[:m]) + fetch_chunk(ids[m:])
+    
+    chunks = [universe_ids[i:i+BATCH_SIZE] for i in range(0, len(universe_ids), BATCH_SIZE)]
+    
+    with ThreadPoolExecutor(max_workers=min(len(chunks), API_WORKERS)) as executor:
+        futures = [executor.submit(fetch_chunk, chunk) for chunk in chunks]
+        results = []
+        for future in as_completed(futures):
+            try:
+                results.extend(future.result())
+            except Exception as e:
+                print(f"[get_game_details_concurrent] Chunk failed: {e!r}")
+    
+    return results
+
+def get_game_votes_concurrent(universe_ids):
+    """Concurrent version of get_game_votes"""
+    def fetch_chunk(ids):
+        s = ",".join(ids)
+        url = f"https://games.roblox.com/v1/games/votes?universeIds={s}"
+        try:
+            data = safe_get(url).get("data", [])
+            return {str(v["id"]): {"upVotes": v["upVotes"], "downVotes": v["downVotes"]} for v in data}
+        except Exception:
+            if len(ids) == 1:
+                return {}
+            m = len(ids) // 2
+            a = fetch_chunk(ids[:m])
+            b = fetch_chunk(ids[m:])
+            a.update(b)
+            return a
+    
+    chunks = [universe_ids[i:i+BATCH_SIZE] for i in range(0, len(universe_ids), BATCH_SIZE)]
+    
+    votes = {}
+    with ThreadPoolExecutor(max_workers=min(len(chunks), API_WORKERS)) as executor:
+        futures = [executor.submit(fetch_chunk, chunk) for chunk in chunks]
+        for future in as_completed(futures):
+            try:
+                votes.update(future.result())
+            except Exception as e:
+                print(f"[get_game_votes_concurrent] Chunk failed: {e!r}")
+    
+    return votes
+
+def fetch_icons_concurrent(universe_ids):
+    """Concurrent version of fetch_icons"""
+    def fetch_chunk(ids):
+        s = ",".join(ids)
+        url = f"https://thumbnails.roblox.com/v1/games/icons?universeIds={s}&size=512x512&format=Png"
+        try:
+            data = safe_get(url).get("data", [])
+            return {str(e["targetId"]): e["imageUrl"] for e in data}
+        except Exception:
+            return {}
+    
+    chunks = [universe_ids[i:i+BATCH_SIZE] for i in range(0, len(universe_ids), BATCH_SIZE)]
+    
+    icons = {}
+    with ThreadPoolExecutor(max_workers=min(len(chunks), API_WORKERS)) as executor:
+        futures = [executor.submit(fetch_chunk, chunk) for chunk in chunks]
+        for future in as_completed(futures):
+            try:
+                icons.update(future.result())
+            except Exception as e:
+                print(f"[fetch_icons_concurrent] Chunk failed: {e!r}")
+    
+    return icons
+
+def fetch_thumbnails_concurrent(universe_ids):
+    """Concurrent version of fetch_thumbnails"""
+    def fetch_chunk(ids):
+        s = ",".join(ids)
+        url = f"https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={s}&size=768x432&format=Png"
+        try:
+            response = safe_get(url)
+            data = response.get("data", [])
+            thumbs = {}
+            
+            for game_data in data:
+                universe_id = str(game_data.get("universeId", ""))
+                thumbnails_list = game_data.get("thumbnails", [])
+                
+                if thumbnails_list and len(thumbnails_list) > 0:
+                    first_thumbnail = thumbnails_list[0]
+                    if first_thumbnail.get("state") == "Completed":
+                        if image_url := first_thumbnail.get("imageUrl", ""):
+                            thumbs[universe_id] = image_url
+            
+            return thumbs
+        except Exception:
+            return {}
+    
+    chunks = [universe_ids[i:i+BATCH_SIZE] for i in range(0, len(universe_ids), BATCH_SIZE)]
+    
+    thumbs = {}
+    with ThreadPoolExecutor(max_workers=min(len(chunks), API_WORKERS)) as executor:
+        futures = [executor.submit(fetch_chunk, chunk) for chunk in chunks]
+        for future in as_completed(futures):
+            try:
+                thumbs.update(future.result())
+            except Exception as e:
+                print(f"[fetch_thumbnails_concurrent] Chunk failed: {e!r}")
+    
+    return thumbs
+
+# ─── Legacy Functions (for collecting initial data) ───────────────────────────
 def fetch_creator_games(user_id):
     print(f"[fetch_creator_games] user={user_id}")
     games, cursor = [], ""
@@ -445,20 +539,17 @@ def fetch_creator_games(user_id):
     
     while True:
         page_count += 1
-        if page_count > 100:  # Safety limit
-            print(f"[fetch_creator_games] Hit page limit for user {user_id}")
+        if page_count > 100:
             break
             
         qs = f"accessFilter=Public&sortOrder=Asc&limit=50" + (f"&cursor={cursor}" if cursor else "")
         try:
             data = safe_get(f"{base}?{qs}")
         except Exception as e:
-            print(f"[fetch_creator_games] Failed for user {user_id}: {e!r}")
+            print(f"[fetch_creator_games] Failed: {e!r}")
             break
             
         chunk = data.get("data", [])
-        print(f"[fetch_creator_games] page {page_count}: got {len(chunk)} games")
-        
         for it in chunk:
             games.append({"universeId": str(it["id"]), "name": it.get("name","")})
         
@@ -469,38 +560,30 @@ def fetch_creator_games(user_id):
     return games
 
 def fetch_user_groups(user_id):
-    print(f"[fetch_user_groups] user={user_id}")
     try:
         data = safe_get(f"https://groups.roblox.com/v2/users/{user_id}/groups/roles")
-        groups = [str(g["group"]["id"]) for g in data.get("data",[]) if "group" in g]
-        print(f"[fetch_user_groups] found {len(groups)} groups")
-        return groups
+        return [str(g["group"]["id"]) for g in data.get("data",[]) if "group" in g]
     except Exception as e:
-        print(f"[fetch_user_groups] Failed for user {user_id}: {e!r}")
+        print(f"[fetch_user_groups] Failed: {e!r}")
         return []
 
 def fetch_group_games(group_id):
-    print(f"[fetch_group_games] group={group_id}")
     games, cursor = [], ""
     base = f"https://games.roblox.com/v2/groups/{group_id}/games"
     page_count = 0
     
     while True:
         page_count += 1
-        if page_count > 100:  # Safety limit
-            print(f"[fetch_group_games] Hit page limit for group {group_id}")
+        if page_count > 100:
             break
             
         qs = f"accessFilter=Public&sortOrder=Asc&limit=50" + (f"&cursor={cursor}" if cursor else "")
         try:
             data = safe_get(f"{base}?{qs}")
         except Exception as e:
-            print(f"[fetch_group_games] Failed for group {group_id}: {e!r}")
             break
             
         chunk = data.get("data",[])
-        print(f"[fetch_group_games] page {page_count}: got {len(chunk)} games")
-        
         for it in chunk:
             games.append({
                 "universeId": str(it.get("id") or it.get("universeId")),
@@ -513,134 +596,33 @@ def fetch_group_games(group_id):
     
     return games
 
-def get_game_details(universe_ids):
-    print(f"[get_game_details] total IDs={len(universe_ids)}, batches of {BATCH_SIZE}")
+def upsert_games(games: List[Tuple[int, str]]):
+    if not games:
+        return
     
-    def fetch_chunk(ids):
-        s = ",".join(ids)
-        url = f"https://games.roblox.com/v1/games?universeIds={s}"
+    chunk_size = 100
+    for i in range(0, len(games), chunk_size):
+        chunk = games[i:i+chunk_size]
+        sql = """
+        INSERT INTO games(id,name) VALUES %s
+          ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name
+        """
         try:
-            data = safe_get(url).get("data",[])
-            print(f"[get_game_details] chunk size={len(ids)} → got {len(data)} records")
-            return data
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    execute_values(cur, sql, chunk)
+                conn.commit()
         except Exception as e:
-            print(f"[get_game_details] Chunk failed: {e!r}")
-            if len(ids) == 1:
-                print(f"[get_game_details] Skipping single {ids[0]}")
-                return []
-            # Split and retry
-            m = len(ids) // 2
-            return fetch_chunk(ids[:m]) + fetch_chunk(ids[m:])
-    
-    out = []
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        batch = universe_ids[i:i+BATCH_SIZE]
-        print(f"[get_game_details] fetching batch {i//BATCH_SIZE+1}/{(len(universe_ids)-1)//BATCH_SIZE+1}")
-        try:
-            out.extend(fetch_chunk(batch))
-        except Exception as e:
-            print(f"[get_game_details] Batch {i//BATCH_SIZE+1} completely failed: {e!r}")
-        
-        # Memory cleanup
-        if i % (BATCH_SIZE * 10) == 0:
-            gc.collect()
-    
-    return out
+            print(f"[db] Error upserting games: {e!r}")
 
-def get_game_votes(universe_ids):
-    print(f"[get_game_votes] total IDs={len(universe_ids)}, batches of {BATCH_SIZE}")
-    
-    def fetch_chunk(ids):
-        s = ",".join(ids)
-        url = f"https://games.roblox.com/v1/games/votes?universeIds={s}"
-        try:
-            data = safe_get(url).get("data",[])
-            print(f"[get_game_votes] chunk size={len(ids)} → got {len(data)} votes")
-            return {str(v["id"]):{"upVotes":v["upVotes"],"downVotes":v["downVotes"]} for v in data}
-        except Exception as e:
-            print(f"[get_game_votes] Chunk failed: {e!r}")
-            if len(ids) == 1:
-                return {}
-            m = len(ids) // 2
-            a = fetch_chunk(ids[:m])
-            b = fetch_chunk(ids[m:])
-            a.update(b)
-            return a
-    
-    votes = {}
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        batch = universe_ids[i:i+BATCH_SIZE]
-        print(f"[get_game_votes] fetching batch {i//BATCH_SIZE+1}")
-        try:
-            votes.update(fetch_chunk(batch))
-        except Exception as e:
-            print(f"[get_game_votes] Batch {i//BATCH_SIZE+1} completely failed: {e!r}")
-    
-    return votes
-
-def fetch_icons(universe_ids):
-    print(f"[fetch_icons] total IDs={len(universe_ids)}, batches of {BATCH_SIZE}")
-    icons = {}
-    
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        batch = universe_ids[i:i+BATCH_SIZE]
-        s = ",".join(batch)
-        url = f"https://thumbnails.roblox.com/v1/games/icons?universeIds={s}&size=512x512&format=Png"
-        print(f"[fetch_icons] batch {i//BATCH_SIZE+1}")
-        
-        try:
-            for e in safe_get(url).get("data",[]):
-                icons[str(e["targetId"])] = e["imageUrl"]
-            print(f"[fetch_icons] got {len(batch)} URLs")
-        except Exception as e:
-            print(f"[fetch_icons] Batch failed: {e!r}")
-    
-    return icons
-
-def fetch_thumbnails(universe_ids):
-    print(f"[fetch_thumbnails] total IDs={len(universe_ids)}, batches of {BATCH_SIZE}")
-    thumbs = {}
-
-    def fetch_batch(batch):
-        s = ",".join(batch)
-        url = f"https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={s}&size=768x432&format=Png"
-        
-        try:
-            response = safe_get(url)
-            data = response.get("data", [])
-            print(f"[fetch_thumbnails] got {len(data)} thumbnail responses")
-            
-            for game_data in data:
-                universe_id = str(game_data.get("universeId", ""))
-                thumbnails_list = game_data.get("thumbnails", [])
-                
-                if thumbnails_list and len(thumbnails_list) > 0:
-                    first_thumbnail = thumbnails_list[0]
-                    if first_thumbnail.get("state") == "Completed":
-                        image_url = first_thumbnail.get("imageUrl", "")
-                        if image_url:
-                            thumbs[universe_id] = image_url
-                            
-        except Exception as e:
-            print(f"[fetch_thumbnails] batch error: {e!r}")
-            if len(batch) > 1:
-                mid = len(batch) // 2
-                fetch_batch(batch[:mid])
-                fetch_batch(batch[mid:])
-
-    for i in range(0, len(universe_ids), BATCH_SIZE):
-        batch = universe_ids[i:i+BATCH_SIZE]
-        print(f"[fetch_thumbnails] processing batch {i//BATCH_SIZE+1}")
-        fetch_batch(batch)
-
-    return thumbs
-
-# ─── Main processing with checkpoints ──────────────────────────────────────────
+# ─── Main Multi-threaded Processing ───────────────────────────────────────────
 def scrape_and_snapshot():
-    print("[main] Starting scrape run")
+    global total_count, processed_count
+    
+    print("[main] Starting multi-threaded scrape run")
     
     try:
-        # Get all game IDs first
+        # Collect all game IDs (single-threaded for simplicity)
         all_ids = set()
         master_games = []
 
@@ -656,10 +638,9 @@ def scrape_and_snapshot():
                 for g in own + grp:
                     if g["universeId"] and g["universeId"] != "0":
                         all_ids.add(g["universeId"])
-                        master_games.append((int(g["universeId"]), g["name"][:255]))  # Truncate long names
+                        master_games.append((int(g["universeId"]), g["name"][:255]))
             except Exception as e:
                 print(f"[main] Error fetching games for creator {uid}: {e!r}")
-                traceback.print_exc()
 
         print(f"[main] Found {len(master_games)} entries ({len(all_ids)} unique)")
         all_list = list(all_ids)
@@ -668,17 +649,17 @@ def scrape_and_snapshot():
             print("[main] No games found; exiting.")
             return
 
-        save_checkpoint(0, len(all_list), "starting", None)
+        total_count = len(all_list)
+        processed_count = 0
+        save_checkpoint(0, total_count, "starting", None)
 
-        # Dedupe and upsert games
+        # Upsert games
         unique_map = {gid: name for gid, name in master_games}
         deduped = list(unique_map.items())
-        print(f"[main] Deduped to {len(deduped)} unique games")
         upsert_games(deduped)
 
-        # Process in chunks to manage memory
-        chunk_size = 200  # Process 200 games at a time
-        total_processed = 0
+        # Process in concurrent chunks
+        chunk_size = 500  # Larger chunks for multi-threading
         
         for chunk_start in range(0, len(all_list), chunk_size):
             chunk_end = min(chunk_start + chunk_size, len(all_list))
@@ -687,90 +668,71 @@ def scrape_and_snapshot():
             print(f"[main] Processing chunk {chunk_start//chunk_size+1}: games {chunk_start+1}-{chunk_end}")
             
             try:
-                # Fetch metadata for this chunk
-                meta = get_game_details(chunk_ids)
-                votes = get_game_votes(chunk_ids)
-                icons = fetch_icons(chunk_ids) if not SKIP_IMAGES else {}
-                thumbs = fetch_thumbnails(chunk_ids) if not SKIP_IMAGES else {}
-
-                # Process snapshots for this chunk
-                snaps = []
-                for g in meta:
-                    uid = str(g.get("universeId") or g.get("id"))
-                    icon_data = thumb_data = None
-
-                    # Download images if not skipping
-                    if not SKIP_IMAGES:
-                        if icon_url := icons.get(uid):
-                            try:
-                                icon_data = download_image(icon_url)
-                            except Exception as e:
-                                print(f"[download] Icon failed for {uid}: {e!r}")
-
-                        if thumb_url := thumbs.get(uid):
-                            try:
-                                thumb_data = download_image(thumb_url)
-                            except Exception as e:
-                                print(f"[download] Thumbnail failed for {uid}: {e!r}")
-
-                    snap = (
-                        int(uid),
-                        g.get("playing", 0),
-                        g.get("visits", 0),
-                        g.get("favoritedCount", 0),
-                        votes.get(uid, {}).get("upVotes", 0),
-                        votes.get(uid, {}).get("downVotes", 0),
-                        icon_data,
-                        thumb_data,
-                    )
-                    snaps.append(snap)
-
-                # Save this chunk
-                save_snapshots_batch(snaps)
-                total_processed += len(snaps)
+                # Fetch all data for this chunk concurrently
+                batch_data = fetch_batch_data(chunk_ids)
                 
-                # Save checkpoint
-                if total_processed % CHECKPOINT_FREQUENCY == 0:
-                    save_checkpoint(total_processed, len(all_list), "processing", int(uid) if snaps else None)
+                meta = batch_data.get("details", [])
+                votes = batch_data.get("votes", {})
+                icons = batch_data.get("icons", {})
+                thumbs = batch_data.get("thumbnails", {})
                 
-                print(f"[main] Completed chunk: {total_processed}/{len(all_list)} games processed")
+                # Create lookup for meta data
+                meta_dict = {str(g.get("universeId") or g.get("id")): g for g in meta}
                 
-                # Cleanup
-                del meta, votes, icons, thumbs, snaps
+                # Prepare game data for parallel processing
+                game_tasks = []
+                for game_id in chunk_ids:
+                    if game_id in meta_dict:
+                        game_tasks.append((
+                            game_id,
+                            meta_dict[game_id],
+                            votes,
+                            icons,
+                            thumbs
+                        ))
+                
+                # Process games in parallel
+                print(f"[main] Processing {len(game_tasks)} games with {MAX_WORKERS} workers")
+                
+                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                    futures = [executor.submit(process_single_game, task) for task in game_tasks]
+                    
+                    # Wait for all to complete
+                    completed = 0
+                    for future in as_completed(futures):
+                        try:
+                            success = future.result()
+                            completed += 1
+                            if completed % 50 == 0:
+                                print(f"[main] Chunk progress: {completed}/{len(game_tasks)} games")
+                        except Exception as e:
+                            print(f"[main] Game processing error: {e!r}")
+                
+                print(f"[main] Completed chunk: {processed_count}/{total_count} total games processed")
                 gc.collect()
                 
             except Exception as e:
-                print(f"[main] Error processing chunk {chunk_start//chunk_size+1}: {e!r}")
+                print(f"[main] Error processing chunk: {e!r}")
                 traceback.print_exc()
-                save_checkpoint(total_processed, len(all_list), f"error_chunk_{chunk_start//chunk_size+1}", None)
 
-        # Final operations
-        save_checkpoint(total_processed, len(all_list), "pruning", None)
-        prune_stale([int(x) for x in all_list])
-        save_checkpoint(total_processed, len(all_list), "completed", None)
-        
-        print(f"[main] 🕒 Completed {len(all_list)} games at {datetime.utcnow()}")
+        save_checkpoint(processed_count, total_count, "completed", None)
+        print(f"[main] 🕒 Completed {total_count} games at {datetime.utcnow()}")
+        print(f"[main] Successfully processed {processed_count} games with multi-threading")
 
     except Exception as e:
         print(f"[main] Fatal error: {e!r}")
         traceback.print_exc()
-        save_checkpoint(0, 0, f"fatal_error: {str(e)[:200]}", None)
+        save_checkpoint(processed_count, total_count, f"fatal_error: {str(e)[:200]}", None)
         raise
 
 def main():
     try:
         ensure_tables()
-        
-        # Check for resume
-        if RESUME_FROM_CHECKPOINT:
-            processed, total, last_game = get_last_checkpoint()
-            print(f"[main] Resume capability: last checkpoint had {processed}/{total} games")
-        
         scrape_and_snapshot()
         
     except KeyboardInterrupt:
         print("\n[main] Interrupted by user")
-        save_checkpoint(0, 0, "interrupted", None)
+        save_checkpoint(processed_count, total_count, "interrupted", None)
     except Exception as e:
         print(f"[main] Unhandled error: {e!r}")
         traceback.print_exc()
