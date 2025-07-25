@@ -6,6 +6,7 @@ Combines: Data Scraping + Continuous ML + Visual Trend Analysis
 
 import os
 import sys
+import json
 import traceback
 from datetime import datetime
 from dotenv import load_dotenv
@@ -315,9 +316,43 @@ class CompleteGameAnalysisSystem:
                 'title': 'Strategic Recommendation',
                 'recommendation': 'Focus on games that combine trending visual styles with high-performing keywords for maximum success probability'
             })
-            
         except Exception as e:
             recommendations.append({
                 'type': 'error',
                 'title': 'Recommendation Generation Error',
                 'recommendation': f'Error generating recommendations: {e}'
+            })
+
+        return recommendations
+
+    def save_session_report(self, results):
+        """Persist a JSON report summarizing the analysis session"""
+        try:
+            os.makedirs('reports', exist_ok=True)
+            ts = results.get('session_start', datetime.utcnow()).strftime('%Y%m%d_%H%M%S')
+            path = f"reports/session_{ts}.json"
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(results, f, indent=2, default=str)
+            print(f"[report] Saved session report to {path}")
+        except Exception as e:
+            print(f"[report] Failed to save session report: {e}")
+
+    def count_completed_phases(self, results):
+        """Return how many analysis phases were completed"""
+        count = 0
+        if results.get('scraping_success'):
+            count += 1
+        if results.get('ml_results'):
+            count += 1
+        if results.get('visual_analysis_results'):
+            count += 1
+        if results.get('combined_insights'):
+            count += 1
+        return count
+
+def main():
+    system = CompleteGameAnalysisSystem()
+    system.run_complete_analysis_cycle()
+
+if __name__ == "__main__":
+    main()
