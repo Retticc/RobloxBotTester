@@ -1192,33 +1192,69 @@ class ContinuousGamePredictor:
         
         return feature_importance
     
-    def save_training_metadata(self, results, df):
-        """Save training session metadata to database"""
-        try:
-            with self.get_conn() as conn:
-                with conn.cursor() as cur:
-                    best_accuracy = max([r['accuracy'] for r in results.values()])
-                    successful_games = df['is_successful'].sum()
-                    
-                    # Get top features
-                    if hasattr(self, 'feature_names') and 'random_forest' in self.models:
-                        importances = self.models['random_forest'].feature_importances_
-                        top_features = dict(zip(self.feature_names, importances.tolist()))
-                    else:
-                        top_features = {}
-                    
-                    cur.execute("""
-                        INSERT INTO ml_training_history 
-                        (total_games, successful_games, model_accuracy, top_features, model_version, notes)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                    """, (
-                        len(df), successful_games, best_accuracy, 
-                        json.dumps(top_features), "continuous_v1.0",
-                        f"Trained with {len(self.dynamic_keywords)} dynamic keywords"
-                    ))
-                conn.commit()
-        except Exception as e:
-            print(f"[metadata] Error saving training metadata: {e}")
+   # In your continuous_predictor.py, add this helper function:
+
+def convert_numpy_types(obj):
+    """Convert numpy types to Python native types for database compatibility"""
+    import numpy as np
+    
+    if isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        return obj
+
+# Then update the save_training_metadata method:
+
+def save_training_metadata(self, results, df):
+    """Save training session metadata to database"""
+    try:
+        with self.get_conn() as conn:
+            with conn.cursor() as cur:
+                best_accuracy = max([r['accuracy'] for r in results.values()])
+                successful_games = int(df['is_successful'].sum())  # Convert to int
+                
+                # Get top features and convert numpy types
+                if hasattr(self, 'feature_names') and 'random_forest' in self.models:
+                    importances = self.models['random_forest'].feature_importances_
+                    top_features = dict(zip(self.feature_names, [float(x) for x in importances.tolist()]))
+                else:
+                    top_features = {}
+                
+                # Convert all data to ensure compatibility
+                metadata = {
+                    'total_games': int(len(df)),
+                    'successful_games': successful_games,
+                    'model_accuracy': float(best_accuracy),
+                    'top_features': convert_numpy_types(top_features),
+                    'model_version': "continuous_v1.0",
+                    'notes': f"Trained with {len(self.dynamic_keywords)} dynamic keywords"
+                }
+                
+                cur.execute("""
+                    INSERT INTO ml_training_history 
+                    (total_games, successful_games, model_accuracy, top_features, model_version, notes)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    metadata['total_games'],
+                    metadata['successful_games'], 
+                    metadata['model_accuracy'],
+                    json.dumps(metadata['top_features']),
+                    metadata['model_version'],
+                    metadata['notes']
+                ))
+            conn.commit()
+    except Exception as e:
+        print(f"[metadata] Error saving training metadata: {e}")
+
+
     
     def analyze_recent_patterns(self):
         """Analyze recent success patterns and image change impacts"""
