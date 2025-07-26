@@ -26,27 +26,27 @@ import threading
 load_dotenv()
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
-DATABASE_URL         = os.getenv("DATABASE_URL")
-CREATORS            = [u.strip() for u in os.getenv("TARGET_CREATORS","").split(",") if u.strip()]
-TOKENS              = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS","").split(",") if t.strip()]
-MAX_IDS_PER_REQ     = 100
-env_batch           = int(os.getenv("BATCH_SIZE","50"))
-BATCH_SIZE          = max(1, min(env_batch, MAX_IDS_PER_REQ))
-RATE_LIMIT_DELAY    = float(os.getenv("RATE_LIMIT_DELAY","0.5"))
-PROXY_API_KEY       = os.getenv("PROXY_API_KEY","")
-PROXY_API_BASE      = os.getenv("PROXY_API_BASE","https://proxy-ipv4.com/client-api/v1")
-PROXY_URLS_FALLBACK = [p.strip() for p in os.getenv("PROXY_URLS","").split(",") if p.strip()]
+DATABASE_URL = os.getenv("DATABASE_URL")
+CREATORS = [u.strip() for u in os.getenv("TARGET_CREATORS", "").split(",") if u.strip()]
+TOKENS = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS", "").split(",") if t.strip()]
+MAX_IDS_PER_REQ = 100
+env_batch = int(os.getenv("BATCH_SIZE", "50"))
+BATCH_SIZE = max(1, min(env_batch, MAX_IDS_PER_REQ))
+RATE_LIMIT_DELAY = float(os.getenv("RATE_LIMIT_DELAY", "0.5"))
+PROXY_API_KEY = os.getenv("PROXY_API_KEY", "")
+PROXY_API_BASE = os.getenv("PROXY_API_BASE", "https://proxy-ipv4.com/client-api/v1")
+PROXY_URLS_FALLBACK = [p.strip() for p in os.getenv("PROXY_URLS", "").split(",") if p.strip()]
 
 # Multi-threading configuration
-MAX_WORKERS         = int(os.getenv("MAX_WORKERS", "8"))
-IMAGE_WORKERS       = int(os.getenv("IMAGE_WORKERS", "4"))
-API_WORKERS         = int(os.getenv("API_WORKERS", "6"))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))
+IMAGE_WORKERS = int(os.getenv("IMAGE_WORKERS", "4"))
+API_WORKERS = int(os.getenv("API_WORKERS", "6"))
 
 # Other configuration
 CHECKPOINT_FREQUENCY = int(os.getenv("CHECKPOINT_FREQUENCY", "100"))
-MAX_IMAGE_SIZE_MB   = int(os.getenv("MAX_IMAGE_SIZE_MB", "10"))
+MAX_IMAGE_SIZE_MB = int(os.getenv("MAX_IMAGE_SIZE_MB", "10"))
 RESUME_FROM_CHECKPOINT = os.getenv("RESUME_FROM_CHECKPOINT", "false").lower() == "true"
-SKIP_IMAGES         = os.getenv("SKIP_IMAGES", "false").lower() == "true"
+SKIP_IMAGES = os.getenv("SKIP_IMAGES", "false").lower() == "true"
 
 # Thread-safe counters and locks
 progress_lock = Lock()
@@ -55,6 +55,7 @@ total_count = 0
 
 print(f"[startup] batch size={BATCH_SIZE}, rate_delay={RATE_LIMIT_DELAY}")
 print(f"[startup] workers: api={API_WORKERS}, images={IMAGE_WORKERS}, max={MAX_WORKERS}")
+
 
 # ─── Safe Data Access Helpers ─────────────────────────────────────────────────
 def safe_extract(data, key, default=None):
@@ -68,6 +69,7 @@ def safe_extract(data, key, default=None):
             return default
     except:
         return default
+
 
 def safe_nested_get(data, path, default=None):
     """Safely extract nested data with a fallback"""
@@ -84,12 +86,14 @@ def safe_nested_get(data, path, default=None):
     except:
         return default
 
+
 def safe_int_convert(value, default=0):
     """Safely convert value to int"""
     try:
         return int(value) if value is not None else default
     except (ValueError, TypeError):
         return default
+
 
 def safe_str_convert(value, default=""):
     """Safely convert value to string"""
@@ -98,9 +102,11 @@ def safe_str_convert(value, default=""):
     except:
         return default
 
+
 # ─── Enhanced Database Helpers with Description Support ───────────────────────
 def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
+
 
 def ensure_tables():
     print("[db] Ensuring tables exist with description support…")
@@ -209,6 +215,7 @@ def ensure_tables():
         conn.commit()
     print("[db] Tables ready with description support.")
 
+
 def upsert_games_with_description(games: List[Tuple[int, str, str]]):
     """Upsert games with name and description"""
     print(f"[db] Upserting {len(games)} games with descriptions…")
@@ -252,6 +259,7 @@ def upsert_games_with_description(games: List[Tuple[int, str, str]]):
                     print(f"[db] Failed to insert individual game {game_id}: {e2!r}")
     print("[db] Games upsert with descriptions complete.")
 
+
 # ─── HTTP Helpers ──────────────────────────────────────────────────────────────
 def fetch_proxies_from_api():
     if not PROXY_API_KEY:
@@ -263,7 +271,7 @@ def fetch_proxies_from_api():
         proxies = []
         for e in data.get("ipv4", []):
             ip, auth = e["ip"], e["authInfo"]
-            for port_key, scheme in (("httpsPort","http"),("socks5Port","socks5")):
+            for port_key, scheme in (("httpsPort", "http"), ("socks5Port", "socks5")):
                 if port := e.get(port_key):
                     proxies.append(f"{scheme}://{auth['login']}:{auth['password']}@{ip}:{port}")
         return proxies
@@ -271,9 +279,11 @@ def fetch_proxies_from_api():
         print(f"[proxy] API error: {e!r}")
         return []
 
+
 PROXIES = fetch_proxies_from_api() or PROXY_URLS_FALLBACK
 proxy_lock = Lock()
 thread_local = threading.local()
+
 
 def get_cookie():
     if not hasattr(thread_local, 'cookie_idx'):
@@ -284,6 +294,7 @@ def get_cookie():
     thread_local.cookie_idx += 1
     return {".ROBLOSECURITY": tok}
 
+
 def get_user_agent():
     return random.choice([
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36/Chrome/126.0.0.0 Safari/537.36",
@@ -291,13 +302,15 @@ def get_user_agent():
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36/Chrome/126.0.0.0 Safari/537.36",
     ])
 
+
 def get_session():
     s = requests.Session()
     if PROXIES:
         with proxy_lock:
             p = random.choice(PROXIES)
-        s.proxies.update({"http":p, "https":p})
+        s.proxies.update({"http": p, "https": p})
     return s
+
 
 def safe_get(url, retries=3):
     last_err = None
@@ -324,6 +337,7 @@ def safe_get(url, retries=3):
         if attempt < retries:
             time.sleep((2 ** attempt) + random.random())
     raise RuntimeError(f"GET failed after {retries} attempts: {url!r}\nLast error: {last_err!r}")
+
 
 # ─── Enhanced Game Data Fetching with Descriptions ────────────────────────────
 def get_game_details_with_descriptions(universe_ids):
@@ -436,6 +450,7 @@ def get_game_details_with_descriptions(universe_ids):
     print(f"[get_game_details] Combined {len(all_details)} games with descriptions")
     return all_details
 
+
 # ─── Enhanced Game Collection Functions with Bug Fixes ────────────────────────
 def fetch_creator_games(user_id):
     """Fetch creator games with descriptions"""
@@ -498,6 +513,7 @@ def fetch_creator_games(user_id):
     print(f"[fetch_creator_games] Got {len(games)} games for user {user_id}")
     return games
 
+
 def fetch_group_games(group_id):
     """Fetch group games with descriptions"""
     games, cursor = [], ""
@@ -558,6 +574,7 @@ def fetch_group_games(group_id):
     print(f"[fetch_group_games] Got {len(games)} games for group {group_id}")
     return games
 
+
 def fetch_user_groups(user_id):
     try:
         data = safe_get(f"https://groups.roblox.com/v2/users/{user_id}/groups/roles")
@@ -573,6 +590,7 @@ def fetch_user_groups(user_id):
     except Exception as e:
         print(f"[fetch_user_groups] Failed: {e!r}")
         return []
+
 
 # ─── Image Processing Functions ────────────────────────────────────────────────
 def resize_image_to_limit(image_data, max_size_bytes):
@@ -634,6 +652,7 @@ def resize_image_to_limit(image_data, max_size_bytes):
         print(f"[resize_image] ⚠ Resize failed: {e!r}")
         return None
 
+
 def download_image(url, retries=2):
     if SKIP_IMAGES:
         return None
@@ -674,6 +693,7 @@ def download_image(url, retries=2):
     
     return None
 
+
 # ─── API Data Fetching Functions ──────────────────────────────────────────────
 def get_game_votes_concurrent(universe_ids):
     def fetch_chunk(ids):
@@ -709,6 +729,7 @@ def get_game_votes_concurrent(universe_ids):
                 print(f"[get_game_votes_concurrent] Chunk failed: {e!r}")
     return votes
 
+
 def fetch_icons_concurrent(universe_ids):
     def fetch_chunk(ids):
         s = ",".join(ids)
@@ -735,6 +756,7 @@ def fetch_icons_concurrent(universe_ids):
             except Exception as e:
                 print(f"[fetch_icons_concurrent] Chunk failed: {e!r}")
     return icons
+
 
 def fetch_thumbnails_concurrent(universe_ids):
     def fetch_chunk(ids):
@@ -770,6 +792,7 @@ def fetch_thumbnails_concurrent(universe_ids):
                 print(f"[fetch_thumbnails_concurrent] Chunk failed: {e!r}")
     return thumbs
 
+
 # ─── Checkpoint and Progress Functions ────────────────────────────────────────
 def save_checkpoint(processed: int, total: int, status: str, last_game_id: Optional[int] = None):
     try:
@@ -784,6 +807,7 @@ def save_checkpoint(processed: int, total: int, status: str, last_game_id: Optio
     except Exception as e:
         print(f"[checkpoint] Failed to save: {e!r}")
 
+
 def update_progress():
     global processed_count
     with progress_lock:
@@ -792,6 +816,7 @@ def update_progress():
             print(f"[progress] {processed_count}/{total_count} games completed ({processed_count/total_count*100:.1f}%)")
         if processed_count % CHECKPOINT_FREQUENCY == 0:
             save_checkpoint(processed_count, total_count, "processing", None)
+
 
 def save_single_snapshot(snap: Tuple):
     sql = """
@@ -809,6 +834,7 @@ def save_single_snapshot(snap: Tuple):
     except Exception as e:
         print(f"[db] Error saving snapshot for game {snap[0]}: {e!r}")
         return False
+
 
 def process_single_game(game_data):
     game_id, game_meta, votes_dict, icons_dict, thumbs_dict = game_data
@@ -860,6 +886,7 @@ def process_single_game(game_data):
         print(f"[process_game] Error processing game {game_id}: {e!r}")
         return False
 
+
 def fetch_batch_data(universe_ids):
     """Fetch all data for a batch of universe IDs using concurrent requests"""
     print(f"[fetch_batch] Processing {len(universe_ids)} games with {API_WORKERS} workers")
@@ -898,6 +925,7 @@ def fetch_batch_data(universe_ids):
             results[api_type] = data
     
     return results
+
 
 # ─── Enhanced Main Processing Function with Bug Fixes ─────────────────────────
 def scrape_and_snapshot():
@@ -1068,6 +1096,7 @@ def scrape_and_snapshot():
         save_checkpoint(processed_count, total_count, f"fatal_error: {str(e)[:200]}", None)
         raise
 
+
 def main():
     try:
         ensure_tables()
@@ -1080,6 +1109,7 @@ def main():
         print(f"[main] Unhandled error: {e!r}")
         traceback.print_exc()
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
