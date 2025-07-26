@@ -47,6 +47,56 @@ from collections import Counter
 load_dotenv()
 
 class ContinuousGamePredictor:
+       def load_models_enhanced(self, filepath='continuous_game_models.pkl'):
+    """Load enhanced models with metadata"""
+    try:
+        import pickle
+        with open(filepath, 'rb') as f:
+            model_data = pickle.load(f)
+        
+        self.models = model_data.get('models', {})
+        self.scalers = model_data.get('scalers', {})
+        self.feature_names = model_data.get('feature_names', [])
+        self.success_thresholds = model_data.get('success_thresholds', self.success_thresholds)
+        self.dynamic_keywords = set(model_data.get('dynamic_keywords', []))
+        self.model_metadata = model_data.get('model_metadata', self.model_metadata)
+        self.last_keyword_update = model_data.get('last_keyword_update')
+        
+        print(f"[load] Enhanced models loaded from {filepath}")
+        print(f"[load] {len(self.dynamic_keywords)} keywords, last trained: {self.model_metadata.get('last_training')}")
+        return True
+        
+    except FileNotFoundError:
+        print(f"[load] Model file {filepath} not found - starting fresh")
+        return False
+    except Exception as e:
+        print(f"[load] Error loading models: {e}")
+        return False
+
+def save_models_enhanced(self, filepath='continuous_game_models.pkl'):
+    """Save enhanced models with metadata"""
+    try:
+        import pickle
+        model_data = {
+            'models': self.models,
+            'scalers': self.scalers,
+            'feature_names': self.feature_names,
+            'success_thresholds': self.success_thresholds,
+            'dynamic_keywords': list(self.dynamic_keywords),
+            'model_metadata': self.model_metadata,
+            'last_keyword_update': self.last_keyword_update
+        }
+        
+        with open(filepath, 'wb') as f:
+            pickle.dump(model_data, f)
+        
+        print(f"[save] Enhanced models saved to {filepath}")
+        return True
+        
+    except Exception as e:
+        print(f"[save] Error saving models: {e}")
+        return False
+
     def __init__(self):
         self.db_url = os.getenv("DATABASE_URL")
         self.models = {}
@@ -1492,44 +1542,7 @@ def save_training_metadata(self, results, df):
             traceback.print_exc()
             return None
     
-    def save_models_enhanced(self, filepath='continuous_game_models.pkl'):
-        """Save enhanced models with metadata"""
-        model_data = {
-            'models': self.models,
-            'scalers': self.scalers,
-            'feature_names': self.feature_names,
-            'success_thresholds': self.success_thresholds,
-            'dynamic_keywords': list(self.dynamic_keywords),
-            'model_metadata': self.model_metadata,
-            'last_keyword_update': self.last_keyword_update
-        }
-        
-        with open(filepath, 'wb') as f:
-            pickle.dump(model_data, f)
-        
-        print(f"[save] Enhanced models saved to {filepath}")
-    
-    def load_models_enhanced(self, filepath='continuous_game_models.pkl'):
-        """Load enhanced models with metadata"""
-        try:
-            with open(filepath, 'rb') as f:
-                model_data = pickle.load(f)
-            
-            self.models = model_data.get('models', {})
-            self.scalers = model_data.get('scalers', {})
-            self.feature_names = model_data.get('feature_names', [])
-            self.success_thresholds = model_data.get('success_thresholds', self.success_thresholds)
-            self.dynamic_keywords = set(model_data.get('dynamic_keywords', []))
-            self.model_metadata = model_data.get('model_metadata', self.model_metadata)
-            self.last_keyword_update = model_data.get('last_keyword_update')
-            
-            print(f"[load] Enhanced models loaded from {filepath}")
-            print(f"[load] {len(self.dynamic_keywords)} keywords, last trained: {self.model_metadata.get('last_training')}")
-            return True
-            
-        except FileNotFoundError:
-            print(f"[load] Model file {filepath} not found")
-            return False
+
 
 def main():
     """Main function for continuous learning"""
