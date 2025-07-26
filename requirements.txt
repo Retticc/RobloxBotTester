@@ -7,3 +7,5 @@ scikit-learn
 Pillow
 beautifulsoup4
 matplotlib
+requests[socks]
+pysocks
