@@ -47,56 +47,6 @@ from collections import Counter
 load_dotenv()
 
 class ContinuousGamePredictor:
-       def load_models_enhanced(self, filepath='continuous_game_models.pkl'):
-    """Load enhanced models with metadata"""
-    try:
-        import pickle
-        with open(filepath, 'rb') as f:
-            model_data = pickle.load(f)
-        
-        self.models = model_data.get('models', {})
-        self.scalers = model_data.get('scalers', {})
-        self.feature_names = model_data.get('feature_names', [])
-        self.success_thresholds = model_data.get('success_thresholds', self.success_thresholds)
-        self.dynamic_keywords = set(model_data.get('dynamic_keywords', []))
-        self.model_metadata = model_data.get('model_metadata', self.model_metadata)
-        self.last_keyword_update = model_data.get('last_keyword_update')
-        
-        print(f"[load] Enhanced models loaded from {filepath}")
-        print(f"[load] {len(self.dynamic_keywords)} keywords, last trained: {self.model_metadata.get('last_training')}")
-        return True
-        
-    except FileNotFoundError:
-        print(f"[load] Model file {filepath} not found - starting fresh")
-        return False
-    except Exception as e:
-        print(f"[load] Error loading models: {e}")
-        return False
-
-def save_models_enhanced(self, filepath='continuous_game_models.pkl'):
-    """Save enhanced models with metadata"""
-    try:
-        import pickle
-        model_data = {
-            'models': self.models,
-            'scalers': self.scalers,
-            'feature_names': self.feature_names,
-            'success_thresholds': self.success_thresholds,
-            'dynamic_keywords': list(self.dynamic_keywords),
-            'model_metadata': self.model_metadata,
-            'last_keyword_update': self.last_keyword_update
-        }
-        
-        with open(filepath, 'wb') as f:
-            pickle.dump(model_data, f)
-        
-        print(f"[save] Enhanced models saved to {filepath}")
-        return True
-        
-    except Exception as e:
-        print(f"[save] Error saving models: {e}")
-        return False
-
     def __init__(self):
         self.db_url = os.getenv("DATABASE_URL")
         self.models = {}
@@ -121,6 +71,56 @@ def save_models_enhanced(self, filepath='continuous_game_models.pkl'):
             'accuracy_history': [],
             'feature_importance_history': []
         }
+    
+    def load_models_enhanced(self, filepath='continuous_game_models.pkl'):
+        """Load enhanced models with metadata"""
+        try:
+            import pickle
+            with open(filepath, 'rb') as f:
+                model_data = pickle.load(f)
+            
+            self.models = model_data.get('models', {})
+            self.scalers = model_data.get('scalers', {})
+            self.feature_names = model_data.get('feature_names', [])
+            self.success_thresholds = model_data.get('success_thresholds', self.success_thresholds)
+            self.dynamic_keywords = set(model_data.get('dynamic_keywords', []))
+            self.model_metadata = model_data.get('model_metadata', self.model_metadata)
+            self.last_keyword_update = model_data.get('last_keyword_update')
+            
+            print(f"[load] Enhanced models loaded from {filepath}")
+            print(f"[load] {len(self.dynamic_keywords)} keywords, last trained: {self.model_metadata.get('last_training')}")
+            return True
+            
+        except FileNotFoundError:
+            print(f"[load] Model file {filepath} not found - starting fresh")
+            return False
+        except Exception as e:
+            print(f"[load] Error loading models: {e}")
+            return False
+
+    def save_models_enhanced(self, filepath='continuous_game_models.pkl'):
+        """Save enhanced models with metadata"""
+        try:
+            import pickle
+            model_data = {
+                'models': self.models,
+                'scalers': self.scalers,
+                'feature_names': self.feature_names,
+                'success_thresholds': self.success_thresholds,
+                'dynamic_keywords': list(self.dynamic_keywords),
+                'model_metadata': self.model_metadata,
+                'last_keyword_update': self.last_keyword_update
+            }
+            
+            with open(filepath, 'wb') as f:
+                pickle.dump(model_data, f)
+            
+            print(f"[save] Enhanced models saved to {filepath}")
+            return True
+            
+        except Exception as e:
+            print(f"[save] Error saving models: {e}")
+            return False
         
     def get_conn(self):
         return psycopg2.connect(self.db_url, sslmode="require")
@@ -1241,70 +1241,64 @@ def save_models_enhanced(self, filepath='continuous_game_models.pkl'):
         print(feature_importance.head(15).to_string(index=False))
         
         return feature_importance
-    
-   # In your continuous_predictor.py, add this helper function:
 
-def convert_numpy_types(obj):
-    """Convert numpy types to Python native types for database compatibility"""
-    import numpy as np
-    
-    if isinstance(obj, dict):
-        return {key: convert_numpy_types(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_numpy_types(item) for item in obj]
-    elif isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    else:
-        return obj
+    def convert_numpy_types(self, obj):
+        """Convert numpy types to Python native types for database compatibility"""
+        import numpy as np
+        
+        if isinstance(obj, dict):
+            return {key: self.convert_numpy_types(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self.convert_numpy_types(item) for item in obj]
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return obj
 
-# Then update the save_training_metadata method:
-
-def save_training_metadata(self, results, df):
-    """Save training session metadata to database"""
-    try:
-        with self.get_conn() as conn:
-            with conn.cursor() as cur:
-                best_accuracy = max([r['accuracy'] for r in results.values()])
-                successful_games = int(df['is_successful'].sum())  # Convert to int
-                
-                # Get top features and convert numpy types
-                if hasattr(self, 'feature_names') and 'random_forest' in self.models:
-                    importances = self.models['random_forest'].feature_importances_
-                    top_features = dict(zip(self.feature_names, [float(x) for x in importances.tolist()]))
-                else:
-                    top_features = {}
-                
-                # Convert all data to ensure compatibility
-                metadata = {
-                    'total_games': int(len(df)),
-                    'successful_games': successful_games,
-                    'model_accuracy': float(best_accuracy),
-                    'top_features': convert_numpy_types(top_features),
-                    'model_version': "continuous_v1.0",
-                    'notes': f"Trained with {len(self.dynamic_keywords)} dynamic keywords"
-                }
-                
-                cur.execute("""
-                    INSERT INTO ml_training_history 
-                    (total_games, successful_games, model_accuracy, top_features, model_version, notes)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (
-                    metadata['total_games'],
-                    metadata['successful_games'], 
-                    metadata['model_accuracy'],
-                    json.dumps(metadata['top_features']),
-                    metadata['model_version'],
-                    metadata['notes']
-                ))
-            conn.commit()
-    except Exception as e:
-        print(f"[metadata] Error saving training metadata: {e}")
-
-
+    def save_training_metadata(self, results, df):
+        """Save training session metadata to database"""
+        try:
+            with self.get_conn() as conn:
+                with conn.cursor() as cur:
+                    best_accuracy = max([r['accuracy'] for r in results.values()])
+                    successful_games = int(df['is_successful'].sum())  # Convert to int
+                    
+                    # Get top features and convert numpy types
+                    if hasattr(self, 'feature_names') and 'random_forest' in self.models:
+                        importances = self.models['random_forest'].feature_importances_
+                        top_features = dict(zip(self.feature_names, [float(x) for x in importances.tolist()]))
+                    else:
+                        top_features = {}
+                    
+                    # Convert all data to ensure compatibility
+                    metadata = {
+                        'total_games': int(len(df)),
+                        'successful_games': successful_games,
+                        'model_accuracy': float(best_accuracy),
+                        'top_features': self.convert_numpy_types(top_features),
+                        'model_version': "continuous_v1.0",
+                        'notes': f"Trained with {len(self.dynamic_keywords)} dynamic keywords"
+                    }
+                    
+                    cur.execute("""
+                        INSERT INTO ml_training_history 
+                        (total_games, successful_games, model_accuracy, top_features, model_version, notes)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (
+                        metadata['total_games'],
+                        metadata['successful_games'], 
+                        metadata['model_accuracy'],
+                        json.dumps(metadata['top_features']),
+                        metadata['model_version'],
+                        metadata['notes']
+                    ))
+                conn.commit()
+        except Exception as e:
+            print(f"[metadata] Error saving training metadata: {e}")
     
     def analyze_recent_patterns(self):
         """Analyze recent success patterns and image change impacts"""
@@ -1541,7 +1535,6 @@ def save_training_metadata(self, results, df):
             import traceback
             traceback.print_exc()
             return None
-    
 
 
 def main():
