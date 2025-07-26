@@ -500,7 +500,7 @@ class VisualTrendAnalyzer:
                     'avg_players': round(data['avg_playing_mean'], 0),
                     'like_ratio': round(data['like_ratio_mean'], 3),
                     'characteristics': {
-                        'brightness': round(data['brightness_mean'], 1),
+                        'brightness': round(data.get('brightness_mean', 128), 1),
                         'saturation': round(data['saturation_mean'], 1),
                         'has_faces_pct': round(data['has_faces'] * 100, 1),
                         'minimalist_pct': round(data.get('minimalist_pct', 0), 1)
