@@ -283,6 +283,50 @@ def safe_get(url, retries=3):
             time.sleep((2 ** attempt) + random.random())
     raise RuntimeError(f"GET failed after {retries} attempts: {url!r}\nLast error: {last_err!r}")
 
+
+# Add these helper functions after your imports and before the configuration:
+
+def safe_extract(data, key, default=None):
+    """Safely extract data from dict/list with fallback"""
+    try:
+        if isinstance(data, dict):
+            return data.get(key, default)
+        elif isinstance(data, list) and isinstance(key, int):
+            return data[key] if len(data) > key else default
+        else:
+            return default
+    except:
+        return default
+
+def safe_nested_get(data, path, default=None):
+    """Safely extract nested data with a fallback"""
+    try:
+        current = data
+        for key in path:
+            if isinstance(current, dict) and key in current:
+                current = current[key]
+            elif isinstance(current, list) and isinstance(key, int) and len(current) > key:
+                current = current[key]
+            else:
+                return default
+        return current
+    except:
+        return default
+
+def safe_int_convert(value, default=0):
+    """Safely convert value to int"""
+    try:
+        return int(value) if value is not None else default
+    except (ValueError, TypeError):
+        return default
+
+def safe_str_convert(value, default=""):
+    """Safely convert value to string"""
+    try:
+        return str(value) if value is not None else default
+    except:
+        return default
+        
 # ─── Enhanced Game Data Fetching with Descriptions ────────────────────────────
 def get_game_details_with_descriptions(universe_ids):
     """Enhanced version that fetches both game details AND descriptions"""
@@ -409,17 +453,44 @@ def fetch_creator_games(user_id):
         qs = f"accessFilter=Public&sortOrder=Asc&limit=50" + (f"&cursor={cursor}" if cursor else "")
         try:
             data = safe_get(f"{base}?{qs}")
+            
+            # Add safety check for data
+            if not data or not isinstance(data, dict):
+                print(f"[fetch_creator_games] Invalid data response for user {user_id}")
+                break
+                
         except Exception as e:
             print(f"[fetch_creator_games] Failed: {e!r}")
             break
             
         chunk = data.get("data", [])
+        
+        # Add safety check for chunk
+        if not isinstance(chunk, list):
+            print(f"[fetch_creator_games] Invalid chunk data for user {user_id}")
+            break
+            
         for it in chunk:
-            games.append({
-                "universeId": str(it["id"]), 
-                "name": it.get("name", ""),
-                "description": it.get("description", "")  # Get description from API if available
-            })
+            # Add safety checks for each item
+            if not it or not isinstance(it, dict):
+                print(f"[fetch_creator_games] Skipping invalid item for user {user_id}")
+                continue
+                
+            # Safely get the game ID
+            game_id = it.get("id")
+            if not game_id:
+                print(f"[fetch_creator_games] Skipping game without ID for user {user_id}")
+                continue
+            
+            try:
+                games.append({
+                    "universeId": str(game_id),
+                    "name": it.get("name", ""),
+                    "description": it.get("description", "")
+                })
+            except Exception as e:
+                print(f"[fetch_creator_games] Error processing game {game_id} for user {user_id}: {e!r}")
+                continue
         
         cursor = data.get("nextPageCursor", "")
         if not cursor:
@@ -427,7 +498,7 @@ def fetch_creator_games(user_id):
     
     print(f"[fetch_creator_games] Got {len(games)} games for user {user_id}")
     return games
-
+    
 def fetch_group_games(group_id):
     """Fetch group games with descriptions"""
     games, cursor = [], ""
@@ -442,21 +513,50 @@ def fetch_group_games(group_id):
         qs = f"accessFilter=Public&sortOrder=Asc&limit=50" + (f"&cursor={cursor}" if cursor else "")
         try:
             data = safe_get(f"{base}?{qs}")
+            
+            # Add safety check for data
+            if not data or not isinstance(data, dict):
+                print(f"[fetch_group_games] Invalid data response for group {group_id}")
+                break
+                
         except Exception as e:
+            print(f"[fetch_group_games] Failed for group {group_id}: {e!r}")
             break
             
         chunk = data.get("data", [])
+        
+        # Add safety check for chunk
+        if not isinstance(chunk, list):
+            print(f"[fetch_group_games] Invalid chunk data for group {group_id}")
+            break
+            
         for it in chunk:
-            games.append({
-                "universeId": str(it.get("id") or it.get("universeId")),
-                "name": it.get("name", ""),
-                "description": it.get("description", "")
-            })
+            # Add safety checks for each item
+            if not it or not isinstance(it, dict):
+                print(f"[fetch_group_games] Skipping invalid item for group {group_id}")
+                continue
+                
+            # Safely get the game ID (try both id and universeId)
+            game_id = it.get("id") or it.get("universeId")
+            if not game_id:
+                print(f"[fetch_group_games] Skipping game without ID for group {group_id}")
+                continue
+            
+            try:
+                games.append({
+                    "universeId": str(game_id),
+                    "name": it.get("name", ""),
+                    "description": it.get("description", "")
+                })
+            except Exception as e:
+                print(f"[fetch_group_games] Error processing game {game_id} for group {group_id}: {e!r}")
+                continue
         
         cursor = data.get("nextPageCursor", "")
         if not cursor:
             break
     
+    print(f"[fetch_group_games] Got {len(games)} games for group {group_id}")
     return games
 
 def fetch_user_groups(user_id):
@@ -787,27 +887,57 @@ def scrape_and_snapshot():
         all_ids = set()
         master_games = []
 
-        for uid in CREATORS:
-            print(f"[main] Fetching games for creator ID: {uid}")
-            try:
-                own = fetch_creator_games(uid)
-                groups = fetch_user_groups(uid)
-                grp = []
-                for g in groups:
-                    grp.extend(fetch_group_games(g))
-                
-                for g in own + grp:
-                    if g["universeId"] and g["universeId"] != "0":
-                        all_ids.add(g["universeId"])
-                        # Now includes description
-                        master_games.append((
-                            int(g["universeId"]), 
-                            g["name"][:255],  # Truncate long names
-                            g.get("description", "")[:2000]  # Truncate long descriptions
-                        ))
-            except Exception as e:
-                print(f"[main] Error fetching games for creator {uid}: {e!r}")
+        # Replace the main loop section in your scrape_and_snapshot function:
 
+for uid in CREATORS:
+    print(f"[main] Fetching games for creator ID: {uid}")
+    try:
+        own = fetch_creator_games(uid)
+        groups = fetch_user_groups(uid)
+        grp = []
+        for g in groups:
+            grp.extend(fetch_group_games(g))
+        
+        # Process games with better error handling
+        all_games = own + grp
+        print(f"[main] Processing {len(all_games)} games for creator {uid}")
+        
+        for g in all_games:
+            try:
+                # Add safety checks for each game
+                if not g or not isinstance(g, dict):
+                    print(f"[main] Skipping invalid game data for creator {uid}")
+                    continue
+                
+                universe_id = g.get("universeId")
+                if not universe_id or universe_id == "0":
+                    print(f"[main] Skipping game without valid universeId for creator {uid}")
+                    continue
+                
+                # Safely process the game
+                all_ids.add(universe_id)
+                
+                # Safe access to game properties with defaults
+                game_name = g.get("name", "Unknown Game")[:255]
+                game_desc = g.get("description", "")[:2000]
+                
+                # Convert universe_id to int safely
+                try:
+                    universe_id_int = int(universe_id)
+                except (ValueError, TypeError):
+                    print(f"[main] Invalid universeId '{universe_id}' for creator {uid}")
+                    continue
+                
+                master_games.append((universe_id_int, game_name, game_desc))
+                
+            except Exception as e:
+                print(f"[main] Error processing individual game for creator {uid}: {e!r}")
+                continue
+                
+    except Exception as e:
+        print(f"[main] Error fetching games for creator {uid}: {e!r}")
+        continue  # Continue with next creator instead of crashing
+        
         print(f"[main] Found {len(master_games)} entries ({len(all_ids)} unique)")
         all_list = list(all_ids)
         
