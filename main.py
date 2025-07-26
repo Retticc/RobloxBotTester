@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Updated scraper with game descriptions support
+Updated scraper with game descriptions support and bug fixes
 This includes both the migration logic and the enhanced scraper
 """
 
@@ -25,7 +25,7 @@ import threading
 
 load_dotenv()
 
-# ─── Configuration (same as before) ────────────────────────────────────────────
+# ─── Configuration ─────────────────────────────────────────────────────────────
 DATABASE_URL         = os.getenv("DATABASE_URL")
 CREATORS            = [u.strip() for u in os.getenv("TARGET_CREATORS","").split(",") if u.strip()]
 TOKENS              = [t.strip() for t in os.getenv("ROBLOSECURITY_TOKENS","").split(",") if t.strip()]
@@ -55,6 +55,48 @@ total_count = 0
 
 print(f"[startup] batch size={BATCH_SIZE}, rate_delay={RATE_LIMIT_DELAY}")
 print(f"[startup] workers: api={API_WORKERS}, images={IMAGE_WORKERS}, max={MAX_WORKERS}")
+
+# ─── Safe Data Access Helpers ─────────────────────────────────────────────────
+def safe_extract(data, key, default=None):
+    """Safely extract data from dict/list with fallback"""
+    try:
+        if isinstance(data, dict):
+            return data.get(key, default)
+        elif isinstance(data, list) and isinstance(key, int):
+            return data[key] if len(data) > key else default
+        else:
+            return default
+    except:
+        return default
+
+def safe_nested_get(data, path, default=None):
+    """Safely extract nested data with a fallback"""
+    try:
+        current = data
+        for key in path:
+            if isinstance(current, dict) and key in current:
+                current = current[key]
+            elif isinstance(current, list) and isinstance(key, int) and len(current) > key:
+                current = current[key]
+            else:
+                return default
+        return current
+    except:
+        return default
+
+def safe_int_convert(value, default=0):
+    """Safely convert value to int"""
+    try:
+        return int(value) if value is not None else default
+    except (ValueError, TypeError):
+        return default
+
+def safe_str_convert(value, default=""):
+    """Safely convert value to string"""
+    try:
+        return str(value) if value is not None else default
+    except:
+        return default
 
 # ─── Enhanced Database Helpers with Description Support ───────────────────────
 def get_conn():
@@ -104,7 +146,7 @@ def ensure_tables():
                 if 'updated_at' not in games_columns:
                     cur.execute("ALTER TABLE games ADD COLUMN updated_at TIMESTAMP DEFAULT NOW();")
             
-            # Handle snapshots table (same as before)
+            # Handle snapshots table
             if not snapshots_columns:
                 print("[db] Creating new snapshots table with BYTEA columns...")
                 cur.execute("""
@@ -210,7 +252,7 @@ def upsert_games_with_description(games: List[Tuple[int, str, str]]):
                     print(f"[db] Failed to insert individual game {game_id}: {e2!r}")
     print("[db] Games upsert with descriptions complete.")
 
-# ─── HTTP Helpers (same as before) ─────────────────────────────────────────────
+# ─── HTTP Helpers ──────────────────────────────────────────────────────────────
 def fetch_proxies_from_api():
     if not PROXY_API_KEY:
         return []
@@ -283,50 +325,6 @@ def safe_get(url, retries=3):
             time.sleep((2 ** attempt) + random.random())
     raise RuntimeError(f"GET failed after {retries} attempts: {url!r}\nLast error: {last_err!r}")
 
-
-# Add these helper functions after your imports and before the configuration:
-
-def safe_extract(data, key, default=None):
-    """Safely extract data from dict/list with fallback"""
-    try:
-        if isinstance(data, dict):
-            return data.get(key, default)
-        elif isinstance(data, list) and isinstance(key, int):
-            return data[key] if len(data) > key else default
-        else:
-            return default
-    except:
-        return default
-
-def safe_nested_get(data, path, default=None):
-    """Safely extract nested data with a fallback"""
-    try:
-        current = data
-        for key in path:
-            if isinstance(current, dict) and key in current:
-                current = current[key]
-            elif isinstance(current, list) and isinstance(key, int) and len(current) > key:
-                current = current[key]
-            else:
-                return default
-        return current
-    except:
-        return default
-
-def safe_int_convert(value, default=0):
-    """Safely convert value to int"""
-    try:
-        return int(value) if value is not None else default
-    except (ValueError, TypeError):
-        return default
-
-def safe_str_convert(value, default=""):
-    """Safely convert value to string"""
-    try:
-        return str(value) if value is not None else default
-    except:
-        return default
-        
 # ─── Enhanced Game Data Fetching with Descriptions ────────────────────────────
 def get_game_details_with_descriptions(universe_ids):
     """Enhanced version that fetches both game details AND descriptions"""
@@ -362,8 +360,8 @@ def get_game_details_with_descriptions(universe_ids):
             data = safe_get(url).get("data", [])
             
             for game in data:
-                universe_id = str(game.get("universeId") or game.get("id", ""))
-                root_place_id = game.get("rootPlaceId")
+                universe_id = str(safe_extract(game, "universeId") or safe_extract(game, "id", ""))
+                root_place_id = safe_extract(game, "rootPlaceId")
                 if root_place_id:
                     place_ids.append(str(root_place_id))
                     universe_to_place[universe_id] = str(root_place_id)
@@ -385,15 +383,16 @@ def get_game_details_with_descriptions(universe_ids):
                 
                 try:
                     data = safe_get(url)
-                    for place_data in data:
-                        place_id = str(place_data.get("placeId", ""))
-                        description = place_data.get("description", "")
-                        
-                        # Find corresponding universe ID
-                        for universe_id, mapped_place_id in universe_to_place.items():
-                            if mapped_place_id == place_id:
-                                descriptions[universe_id] = description
-                                break
+                    if isinstance(data, list):
+                        for place_data in data:
+                            place_id = str(safe_extract(place_data, "placeId", ""))
+                            description = safe_extract(place_data, "description", "")
+                            
+                            # Find corresponding universe ID
+                            for universe_id, mapped_place_id in universe_to_place.items():
+                                if mapped_place_id == place_id:
+                                    descriptions[universe_id] = description
+                                    break
                 except Exception as e:
                     print(f"[get_descriptions] Batch failed: {e!r}")
                     continue
@@ -431,13 +430,13 @@ def get_game_details_with_descriptions(universe_ids):
     
     # Combine details with descriptions
     for game in all_details:
-        universe_id = str(game.get("universeId") or game.get("id", ""))
+        universe_id = str(safe_extract(game, "universeId") or safe_extract(game, "id", ""))
         game["description"] = all_descriptions.get(universe_id, "")
     
     print(f"[get_game_details] Combined {len(all_details)} games with descriptions")
     return all_details
 
-# ─── Enhanced Game Collection Functions ────────────────────────────────────────
+# ─── Enhanced Game Collection Functions with Bug Fixes ────────────────────────
 def fetch_creator_games(user_id):
     """Fetch creator games with descriptions"""
     print(f"[fetch_creator_games] user={user_id}")
@@ -463,7 +462,7 @@ def fetch_creator_games(user_id):
             print(f"[fetch_creator_games] Failed: {e!r}")
             break
             
-        chunk = data.get("data", [])
+        chunk = safe_extract(data, "data", [])
         
         # Add safety check for chunk
         if not isinstance(chunk, list):
@@ -477,7 +476,7 @@ def fetch_creator_games(user_id):
                 continue
                 
             # Safely get the game ID
-            game_id = it.get("id")
+            game_id = safe_extract(it, "id")
             if not game_id:
                 print(f"[fetch_creator_games] Skipping game without ID for user {user_id}")
                 continue
@@ -485,20 +484,20 @@ def fetch_creator_games(user_id):
             try:
                 games.append({
                     "universeId": str(game_id),
-                    "name": it.get("name", ""),
-                    "description": it.get("description", "")
+                    "name": safe_extract(it, "name", ""),
+                    "description": safe_extract(it, "description", "")
                 })
             except Exception as e:
                 print(f"[fetch_creator_games] Error processing game {game_id} for user {user_id}: {e!r}")
                 continue
         
-        cursor = data.get("nextPageCursor", "")
+        cursor = safe_extract(data, "nextPageCursor", "")
         if not cursor:
             break
     
     print(f"[fetch_creator_games] Got {len(games)} games for user {user_id}")
     return games
-    
+
 def fetch_group_games(group_id):
     """Fetch group games with descriptions"""
     games, cursor = [], ""
@@ -523,7 +522,7 @@ def fetch_group_games(group_id):
             print(f"[fetch_group_games] Failed for group {group_id}: {e!r}")
             break
             
-        chunk = data.get("data", [])
+        chunk = safe_extract(data, "data", [])
         
         # Add safety check for chunk
         if not isinstance(chunk, list):
@@ -537,7 +536,7 @@ def fetch_group_games(group_id):
                 continue
                 
             # Safely get the game ID (try both id and universeId)
-            game_id = it.get("id") or it.get("universeId")
+            game_id = safe_extract(it, "id") or safe_extract(it, "universeId")
             if not game_id:
                 print(f"[fetch_group_games] Skipping game without ID for group {group_id}")
                 continue
@@ -545,14 +544,14 @@ def fetch_group_games(group_id):
             try:
                 games.append({
                     "universeId": str(game_id),
-                    "name": it.get("name", ""),
-                    "description": it.get("description", "")
+                    "name": safe_extract(it, "name", ""),
+                    "description": safe_extract(it, "description", "")
                 })
             except Exception as e:
                 print(f"[fetch_group_games] Error processing game {game_id} for group {group_id}: {e!r}")
                 continue
         
-        cursor = data.get("nextPageCursor", "")
+        cursor = safe_extract(data, "nextPageCursor", "")
         if not cursor:
             break
     
@@ -562,12 +561,20 @@ def fetch_group_games(group_id):
 def fetch_user_groups(user_id):
     try:
         data = safe_get(f"https://groups.roblox.com/v2/users/{user_id}/groups/roles")
-        return [str(g["group"]["id"]) for g in data.get("data", []) if "group" in g]
+        groups_data = safe_extract(data, "data", [])
+        groups = []
+        for g in groups_data:
+            group_info = safe_extract(g, "group")
+            if group_info:
+                group_id = safe_extract(group_info, "id")
+                if group_id:
+                    groups.append(str(group_id))
+        return groups
     except Exception as e:
         print(f"[fetch_user_groups] Failed: {e!r}")
         return []
 
-# ─── Keep all other functions the same (image processing, votes, icons, etc.) ──
+# ─── Image Processing Functions ────────────────────────────────────────────────
 def resize_image_to_limit(image_data, max_size_bytes):
     try:
         from PIL import Image
@@ -667,14 +674,21 @@ def download_image(url, retries=2):
     
     return None
 
-# ─── Keep other functions the same (votes, icons, thumbnails, etc.) ────────────
+# ─── API Data Fetching Functions ──────────────────────────────────────────────
 def get_game_votes_concurrent(universe_ids):
     def fetch_chunk(ids):
         s = ",".join(ids)
         url = f"https://games.roblox.com/v1/games/votes?universeIds={s}"
         try:
             data = safe_get(url).get("data", [])
-            return {str(v["id"]): {"upVotes": v["upVotes"], "downVotes": v["downVotes"]} for v in data}
+            votes = {}
+            for v in data:
+                vote_id = str(safe_extract(v, "id", ""))
+                up_votes = safe_extract(v, "upVotes", 0)
+                down_votes = safe_extract(v, "downVotes", 0)
+                if vote_id:
+                    votes[vote_id] = {"upVotes": up_votes, "downVotes": down_votes}
+            return votes
         except Exception:
             if len(ids) == 1:
                 return {}
@@ -701,7 +715,13 @@ def fetch_icons_concurrent(universe_ids):
         url = f"https://thumbnails.roblox.com/v1/games/icons?universeIds={s}&size=512x512&format=Png"
         try:
             data = safe_get(url).get("data", [])
-            return {str(e["targetId"]): e["imageUrl"] for e in data}
+            icons = {}
+            for e in data:
+                target_id = str(safe_extract(e, "targetId", ""))
+                image_url = safe_extract(e, "imageUrl", "")
+                if target_id and image_url:
+                    icons[target_id] = image_url
+            return icons
         except Exception:
             return {}
     
@@ -722,17 +742,18 @@ def fetch_thumbnails_concurrent(universe_ids):
         url = f"https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={s}&size=768x432&format=Png"
         try:
             response = safe_get(url)
-            data = response.get("data", [])
+            data = safe_extract(response, "data", [])
             thumbs = {}
             
             for game_data in data:
-                universe_id = str(game_data.get("universeId", ""))
-                thumbnails_list = game_data.get("thumbnails", [])
+                universe_id = str(safe_extract(game_data, "universeId", ""))
+                thumbnails_list = safe_extract(game_data, "thumbnails", [])
                 
                 if thumbnails_list and len(thumbnails_list) > 0:
                     first_thumbnail = thumbnails_list[0]
-                    if first_thumbnail.get("state") == "Completed":
-                        if image_url := first_thumbnail.get("imageUrl", ""):
+                    if safe_extract(first_thumbnail, "state") == "Completed":
+                        image_url = safe_extract(first_thumbnail, "imageUrl", "")
+                        if image_url and universe_id:
                             thumbs[universe_id] = image_url
             return thumbs
         except Exception:
@@ -749,7 +770,7 @@ def fetch_thumbnails_concurrent(universe_ids):
                 print(f"[fetch_thumbnails_concurrent] Chunk failed: {e!r}")
     return thumbs
 
-# ─── Keep checkpoint and progress functions the same ───────────────────────────
+# ─── Checkpoint and Progress Functions ────────────────────────────────────────
 def save_checkpoint(processed: int, total: int, status: str, last_game_id: Optional[int] = None):
     try:
         with get_conn() as conn:
@@ -802,10 +823,12 @@ def process_single_game(game_data):
             thumb_futures = []
             
             with ThreadPoolExecutor(max_workers=2) as img_executor:
-                if icon_url := icons_dict.get(uid):
+                icon_url = icons_dict.get(uid)
+                if icon_url:
                     icon_futures.append(img_executor.submit(download_image, icon_url))
                 
-                if thumb_url := thumbs_dict.get(uid):
+                thumb_url = thumbs_dict.get(uid)
+                if thumb_url:
                     thumb_futures.append(img_executor.submit(download_image, thumb_url))
                 
                 # Get results
@@ -814,14 +837,14 @@ def process_single_game(game_data):
                 if thumb_futures:
                     thumb_data = thumb_futures[0].result()
         
-        # Create snapshot
+        # Create snapshot with safe data extraction
         snap = (
-            int(uid),
-            game_meta.get("playing", 0),
-            game_meta.get("visits", 0),
-            game_meta.get("favoritedCount", 0),
-            votes_dict.get(uid, {}).get("upVotes", 0),
-            votes_dict.get(uid, {}).get("downVotes", 0),
+            safe_int_convert(uid),
+            safe_extract(game_meta, "playing", 0),
+            safe_extract(game_meta, "visits", 0),
+            safe_extract(game_meta, "favoritedCount", 0),
+            safe_nested_get(votes_dict, [uid, "upVotes"], 0),
+            safe_nested_get(votes_dict, [uid, "downVotes"], 0),
             icon_data,
             thumb_data,
         )
@@ -876,7 +899,7 @@ def fetch_batch_data(universe_ids):
     
     return results
 
-# ─── Enhanced Main Processing Function ─────────────────────────────────────────
+# ─── Enhanced Main Processing Function with Bug Fixes ─────────────────────────
 def scrape_and_snapshot():
     global total_count, processed_count
     
@@ -887,57 +910,54 @@ def scrape_and_snapshot():
         all_ids = set()
         master_games = []
 
-        # Replace the main loop section in your scrape_and_snapshot function:
-
-for uid in CREATORS:
-    print(f"[main] Fetching games for creator ID: {uid}")
-    try:
-        own = fetch_creator_games(uid)
-        groups = fetch_user_groups(uid)
-        grp = []
-        for g in groups:
-            grp.extend(fetch_group_games(g))
-        
-        # Process games with better error handling
-        all_games = own + grp
-        print(f"[main] Processing {len(all_games)} games for creator {uid}")
-        
-        for g in all_games:
+        for uid in CREATORS:
+            print(f"[main] Fetching games for creator ID: {uid}")
             try:
-                # Add safety checks for each game
-                if not g or not isinstance(g, dict):
-                    print(f"[main] Skipping invalid game data for creator {uid}")
-                    continue
+                own = fetch_creator_games(uid)
+                groups = fetch_user_groups(uid)
+                grp = []
+                for g in groups:
+                    grp.extend(fetch_group_games(g))
                 
-                universe_id = g.get("universeId")
-                if not universe_id or universe_id == "0":
-                    print(f"[main] Skipping game without valid universeId for creator {uid}")
-                    continue
+                # Process games with better error handling
+                all_games = own + grp
+                print(f"[main] Processing {len(all_games)} games for creator {uid}")
                 
-                # Safely process the game
-                all_ids.add(universe_id)
-                
-                # Safe access to game properties with defaults
-                game_name = g.get("name", "Unknown Game")[:255]
-                game_desc = g.get("description", "")[:2000]
-                
-                # Convert universe_id to int safely
-                try:
-                    universe_id_int = int(universe_id)
-                except (ValueError, TypeError):
-                    print(f"[main] Invalid universeId '{universe_id}' for creator {uid}")
-                    continue
-                
-                master_games.append((universe_id_int, game_name, game_desc))
-                
+                for g in all_games:
+                    try:
+                        # Add safety checks for each game
+                        if not g or not isinstance(g, dict):
+                            print(f"[main] Skipping invalid game data for creator {uid}")
+                            continue
+                        
+                        universe_id = safe_extract(g, "universeId")
+                        if not universe_id or universe_id == "0":
+                            print(f"[main] Skipping game without valid universeId for creator {uid}")
+                            continue
+                        
+                        # Safely process the game
+                        all_ids.add(universe_id)
+                        
+                        # Safe access to game properties with defaults
+                        game_name = safe_str_convert(safe_extract(g, "name", "Unknown Game"))[:255]
+                        game_desc = safe_str_convert(safe_extract(g, "description", ""))[:2000]
+                        
+                        # Convert universe_id to int safely
+                        universe_id_int = safe_int_convert(universe_id)
+                        if universe_id_int <= 0:
+                            print(f"[main] Invalid universeId '{universe_id}' for creator {uid}")
+                            continue
+                        
+                        master_games.append((universe_id_int, game_name, game_desc))
+                        
+                    except Exception as e:
+                        print(f"[main] Error processing individual game for creator {uid}: {e!r}")
+                        continue
+                        
             except Exception as e:
-                print(f"[main] Error processing individual game for creator {uid}: {e!r}")
-                continue
-                
-    except Exception as e:
-        print(f"[main] Error fetching games for creator {uid}: {e!r}")
-        continue  # Continue with next creator instead of crashing
-        
+                print(f"[main] Error fetching games for creator {uid}: {e!r}")
+                continue  # Continue with next creator instead of crashing
+
         print(f"[main] Found {len(master_games)} entries ({len(all_ids)} unique)")
         all_list = list(all_ids)
         
@@ -985,10 +1005,10 @@ for uid in CREATORS:
                 # Also update game descriptions from the detailed metadata
                 games_to_update = []
                 for game in meta:
-                    universe_id = int(game.get("universeId") or game.get("id", 0))
+                    universe_id = safe_int_convert(safe_extract(game, "universeId") or safe_extract(game, "id"))
                     if universe_id > 0:
-                        name = game.get("name", "")[:255]
-                        description = game.get("description", "")[:2000]
+                        name = safe_str_convert(safe_extract(game, "name", ""))[:255]
+                        description = safe_str_convert(safe_extract(game, "description", ""))[:2000]
                         games_to_update.append((universe_id, name, description))
                 
                 if games_to_update:
@@ -996,7 +1016,11 @@ for uid in CREATORS:
                     upsert_games_with_description(games_to_update)
                 
                 # Create lookup for meta data
-                meta_dict = {str(g.get("universeId") or g.get("id")): g for g in meta}
+                meta_dict = {}
+                for g in meta:
+                    game_key = str(safe_extract(g, "universeId") or safe_extract(g, "id"))
+                    if game_key:
+                        meta_dict[game_key] = g
                 
                 # Prepare game data for parallel processing
                 game_tasks = []
