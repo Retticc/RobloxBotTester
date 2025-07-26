@@ -291,9 +291,11 @@ class ContinuousGamePredictor:
                                  old_art_style, new_art_style)
                                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                             """, (
-                                change['game_id'], change['change_date'], change['change_type'],
-                                change['old_image_hash'], change['new_image_hash'],
-                                change['old_art_style'], change['new_art_style']
+                                int(change['game_id']), change['change_date'], str(change['change_type']),
+                                str(change['old_image_hash']) if change['old_image_hash'] else None, 
+                                str(change['new_image_hash']),
+                                str(change['old_art_style']) if change['old_art_style'] else None, 
+                                str(change['new_art_style'])
                             ))
                         conn.commit()
                     except Exception as e:
@@ -379,7 +381,7 @@ class ContinuousGamePredictor:
                     # Weighted impact score (7d impact weighted more heavily)
                     performance_impact = (impact_7d * 0.7) + (impact_30d * 0.3)
                     
-                    # Update the record
+                    # Update the record with proper type conversion
                     with conn.cursor() as cur:
                         cur.execute("""
                             UPDATE image_change_tracking
@@ -388,9 +390,9 @@ class ContinuousGamePredictor:
                                 performance_impact = %s
                             WHERE id = %s
                         """, (
-                            players_before_7d, players_after_7d,
-                            players_before_30d, players_after_30d,
-                            performance_impact, change['id']
+                            float(players_before_7d), float(players_after_7d),
+                            float(players_before_30d), float(players_after_30d),
+                            float(performance_impact), change['id']
                         ))
                     
                     conn.commit()
@@ -507,48 +509,75 @@ class ContinuousGamePredictor:
             print(f"[keywords] Extracted {len(new_keywords)} potential keywords")
             
             # Update database with new keywords
-            with conn.cursor() as cur:
-                for keyword in new_keywords:
-                    try:
-                        # Calculate success correlation for this keyword
-                        keyword_games = [game for game in popular_games.itertuples() 
-                                       if keyword in f"{game.name} {game.description or ''}".lower()]
+            successful_inserts = 0
+            for keyword in new_keywords:
+                try:
+                    with self.get_conn() as conn:  # Use fresh connection for each keyword
+                        with conn.cursor() as cur:
+                            # Calculate success correlation for this keyword
+                            keyword_games = [game for game in popular_games.itertuples() 
+                                           if keyword in f"{game.name} {game.description or ''}".lower()]
+                            
+                            if len(keyword_games) >= 3:  # Need at least 3 games for correlation
+                                # Convert to native Python types to avoid numpy type issues
+                                keyword_avg_playing = float(np.mean([float(game.avg_playing) for game in keyword_games]))
+                                overall_avg_playing = float(popular_games['avg_playing'].mean())
+                                
+                                # Safety checks for valid values
+                                if overall_avg_playing <= 0 or not np.isfinite(overall_avg_playing):
+                                    success_correlation = 1.0
+                                else:
+                                    success_correlation = float(keyword_avg_playing / overall_avg_playing)
+                                    if not np.isfinite(success_correlation):
+                                        success_correlation = 1.0
+                                
+                                popularity_score = float(len(keyword_games) / len(popular_games))
+                                if not np.isfinite(popularity_score):
+                                    popularity_score = 0.01
+                                
+                                # Validate data types before insertion
+                                assert isinstance(keyword, str), f"keyword should be str, got {type(keyword)}"
+                                assert isinstance(popularity_score, float), f"popularity_score should be float, got {type(popularity_score)}"
+                                assert isinstance(success_correlation, float), f"success_correlation should be float, got {type(success_correlation)}"
+                                assert isinstance(len(keyword_games), int), f"game_count should be int, got {type(len(keyword_games))}"
+                                
+                                # Insert or update keyword - all values are now guaranteed to be Python floats
+                                cur.execute("""
+                                    INSERT INTO dynamic_keywords (keyword, popularity_score, success_correlation, game_count)
+                                    VALUES (%s, %s, %s, %s)
+                                    ON CONFLICT (keyword) DO UPDATE SET
+                                        popularity_score = EXCLUDED.popularity_score,
+                                        success_correlation = EXCLUDED.success_correlation,
+                                        game_count = EXCLUDED.game_count,
+                                        last_updated = NOW()
+                                """, (keyword, popularity_score, success_correlation, len(keyword_games)))
+                                
+                                successful_inserts += 1
                         
-                        if len(keyword_games) >= 3:  # Need at least 3 games for correlation
-                            keyword_avg_playing = np.mean([game.avg_playing for game in keyword_games])
-                            overall_avg_playing = popular_games['avg_playing'].mean()
-                            
-                            success_correlation = keyword_avg_playing / overall_avg_playing if overall_avg_playing > 0 else 1.0
-                            popularity_score = len(keyword_games) / len(popular_games)
-                            
-                            # Insert or update keyword
-                            cur.execute("""
-                                INSERT INTO dynamic_keywords (keyword, popularity_score, success_correlation, game_count)
-                                VALUES (%s, %s, %s, %s)
-                                ON CONFLICT (keyword) DO UPDATE SET
-                                    popularity_score = EXCLUDED.popularity_score,
-                                    success_correlation = EXCLUDED.success_correlation,
-                                    game_count = EXCLUDED.game_count,
-                                    last_updated = NOW()
-                            """, (keyword, popularity_score, success_correlation, len(keyword_games)))
-                    
-                    except Exception as e:
-                        print(f"[keywords] Error processing keyword '{keyword}': {e}")
+                        conn.commit()
                 
-                conn.commit()
+                except Exception as e:
+                    print(f"[keywords] Error processing keyword '{keyword}': {e}")
+                    continue
             
-            # Update our in-memory keyword set
-            keyword_query = """
-            SELECT keyword FROM dynamic_keywords 
-            WHERE popularity_score > 0.01 OR success_correlation > 1.1
-            ORDER BY success_correlation DESC, popularity_score DESC
-            """
+            print(f"[keywords] Successfully processed {successful_inserts} keywords")
             
-            keywords_df = pd.read_sql(keyword_query, conn)
-            self.dynamic_keywords = set(keywords_df['keyword'].tolist())
-            self.last_keyword_update = datetime.utcnow()
-            
-            print(f"[keywords] Updated to {len(self.dynamic_keywords)} active keywords")
+            # Update our in-memory keyword set with fresh connection
+            try:
+                with self.get_conn() as conn:
+                    keyword_query = """
+                    SELECT keyword FROM dynamic_keywords 
+                    WHERE popularity_score > 0.01 OR success_correlation > 1.1
+                    ORDER BY success_correlation DESC, popularity_score DESC
+                    """
+                    
+                    keywords_df = pd.read_sql(keyword_query, conn)
+                    self.dynamic_keywords = set(keywords_df['keyword'].tolist())
+                    self.last_keyword_update = datetime.utcnow()
+                    
+                    print(f"[keywords] Updated to {len(self.dynamic_keywords)} active keywords")
+            except Exception as e:
+                print(f"[keywords] Error updating in-memory keywords: {e}")
     
     def extract_text_features_enhanced(self, text):
         """Enhanced text analysis using dynamic keywords"""
