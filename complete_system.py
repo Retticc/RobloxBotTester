@@ -462,20 +462,20 @@ class OptimizedGameAnalysisSystem:
             'recommendations': []
         }
         
-        # Quick recommendations
-        if results.get('ml_results', {}).get('retrained'):
-            ml_data = results['ml_results']
+        # Quick recommendations with safe null checking
+        ml_results = results.get('ml_results')
+        if ml_results and isinstance(ml_results, dict) and ml_results.get('retrained'):
             insights['recommendations'].append({
                 'type': 'ml_insight',
-                'recommendation': f"ML models updated with {ml_data.get('total_games', 0)} games. Success rate: {ml_data.get('success_rate', 0)*100:.1f}%",
+                'recommendation': f"ML models updated with {ml_results.get('total_games', 0)} games. Success rate: {ml_results.get('success_rate', 0)*100:.1f}%",
                 'priority': 'high'
             })
         
-        if results.get('visual_analysis_results', {}).get('analysis_completed'):
-            visual_data = results['visual_analysis_results']
+        visual_results = results.get('visual_analysis_results')
+        if visual_results and isinstance(visual_results, dict) and visual_results.get('analysis_completed'):
             insights['recommendations'].append({
                 'type': 'visual_trend',
-                'recommendation': f"Visual analysis completed on {visual_data.get('games_analyzed', 0)} games in {visual_data.get('analysis_time_seconds', 0):.1f} seconds",
+                'recommendation': f"Visual analysis completed on {visual_results.get('games_analyzed', 0)} games in {visual_results.get('analysis_time_seconds', 0):.1f} seconds",
                 'priority': 'medium'
             })
         
@@ -497,15 +497,15 @@ class OptimizedGameAnalysisSystem:
         return insights
     
     def _count_completed_phases(self, results):
-        """Count completed phases"""
+        """Count completed phases with safe null checking"""
         completed = 0
         if results.get('scraping_success'):
             completed += 1
-        if results.get('ml_results'):
+        if results.get('ml_results') is not None:
             completed += 1
-        if results.get('visual_analysis_results'):
+        if results.get('visual_analysis_results') is not None:
             completed += 1
-        if results.get('combined_insights'):
+        if results.get('combined_insights') is not None:
             completed += 1
         return completed
     
@@ -541,9 +541,14 @@ def main():
         system = OptimizedGameAnalysisSystem()
         results = system.run_analysis_cycle()
         
-        # Determine exit code
+        # Determine exit code with safe checking
         if results.get('errors'):
-            if results.get('scraping_success') or results.get('ml_results') or results.get('visual_analysis_results'):
+            # Check if any phases completed successfully
+            has_successes = (results.get('scraping_success') or 
+                           results.get('ml_results') is not None or 
+                           results.get('visual_analysis_results') is not None)
+            
+            if has_successes:
                 exit_code = 1  # Partial success
                 print(f"\n⚠️  PARTIAL SUCCESS: Completed with errors in {results.get('duration_seconds', 0)/60:.1f} minutes")
             else:
@@ -553,18 +558,26 @@ def main():
             exit_code = 0  # Complete success
             print(f"\n✅ SUCCESS: Analysis completed in {results.get('duration_seconds', 0)/60:.1f} minutes")
         
-        # Performance summary
+        # Performance summary with proper null checking
         total_time = results.get('duration_seconds', 0)
         if total_time > 0:
             games_processed = 0
-            if results.get('ml_results', {}).get('total_games'):
-                games_processed += results['ml_results']['total_games']
-            if results.get('visual_analysis_results', {}).get('games_analyzed'):
-                games_processed += results['visual_analysis_results']['games_analyzed']
+            
+            # Safely get ML games count
+            ml_results = results.get('ml_results')
+            if ml_results and isinstance(ml_results, dict):
+                games_processed += ml_results.get('total_games', 0)
+            
+            # Safely get visual analysis games count
+            visual_results = results.get('visual_analysis_results')
+            if visual_results and isinstance(visual_results, dict):
+                games_processed += visual_results.get('games_analyzed', 0)
             
             if games_processed > 0:
                 rate = games_processed / total_time
                 print(f"⚡ Processing rate: {rate:.1f} games/second")
+            else:
+                print(f"⚡ Analysis completed in {total_time:.1f} seconds")
         
         sys.exit(exit_code)
         
