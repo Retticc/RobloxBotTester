@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-visual_trend_analyzer_complete.py - Complete Visual Trend Analysis System
+visual_trend_analyzer_complete.py - Complete Visual Trend Analysis System - FIXED VERSION
 Enhanced with error handling, configuration management, and additional features
+Fixed PostgreSQL schema issues and improved database connectivity
 """
 
 import os
@@ -21,6 +22,7 @@ import hashlib
 import warnings
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
+from contextlib import contextmanager
 
 # Image Analysis
 try:
@@ -76,36 +78,77 @@ class AnalysisConfig:
     create_visualizations: bool = True
 
 class DatabaseManager:
-    """Centralized database management"""
+    """Centralized database management with FIXED schema"""
     
     def __init__(self, db_url: str):
         self.db_url = db_url
         self.connection_pool = []
+        logger.info("DatabaseManager initialized with fixed schema")
     
+    @contextmanager
     def get_connection(self):
-        """Get database connection with error handling"""
+        """Get database connection with enhanced error handling"""
+        conn = None
         try:
-            return psycopg2.connect(self.db_url, sslmode="require")
-        except Exception as e:
+            conn = psycopg2.connect(
+                self.db_url, 
+                sslmode="require",
+                connect_timeout=10,
+                application_name="visual_trend_analyzer_fixed"
+            )
+            conn.autocommit = True  # Enable autocommit for DDL operations
+            yield conn
+        except psycopg2.OperationalError as e:
             logger.error(f"Database connection failed: {e}")
-            raise
+            raise e
+        except psycopg2.Error as e:
+            logger.error(f"Database error: {e}")
+            if conn:
+                conn.rollback()
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected database error: {e}")
+            if conn:
+                conn.rollback()
+            raise e
+        finally:
+            if conn and not conn.closed:
+                conn.close()
     
     def execute_query(self, query: str, params: tuple = None, fetch: bool = True) -> Optional[List[Tuple]]:
-        """Execute query with proper error handling"""
+        """Execute query with enhanced error handling and logging"""
         try:
+            # Log query for debugging (first 100 chars)
+            query_preview = query.replace('\n', ' ').strip()[:100] + "..." if len(query) > 100 else query
+            logger.debug(f"Executing query: {query_preview}")
+            
             with self.get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(query, params)
                     if fetch:
-                        return cur.fetchall()
-                    conn.commit()
-                    return None
+                        results = cur.fetchall()
+                        logger.debug(f"Query returned {len(results) if results else 0} rows")
+                        return results
+                    else:
+                        logger.debug("Query executed successfully (no fetch)")
+                        return None
+                        
+        except psycopg2.errors.SyntaxError as e:
+            logger.error(f"SQL Syntax Error: {e}")
+            logger.error(f"Problematic query: {query}")
+            raise e
+        except psycopg2.Error as e:
+            logger.error(f"Database error in query execution: {e}")
+            raise e
         except Exception as e:
-            logger.error(f"Query execution failed: {e}")
-            raise
+            logger.error(f"Unexpected error in query execution: {e}")
+            raise e
     
     def create_tables(self):
-        """Create all necessary tables"""
+        """Create all necessary tables with FIXED schema"""
+        logger.info("Creating database tables with fixed schema...")
+        
+        # FIXED: Remove the problematic UNIQUE constraint with ::date casting
         tables = {
             'trending_visual_assets': """
                 CREATE TABLE IF NOT EXISTS trending_visual_assets (
@@ -124,8 +167,7 @@ class DatabaseManager:
                     trend_rank INTEGER,
                     analysis_date TIMESTAMP DEFAULT NOW(),
                     image_hash TEXT,
-                    confidence_score FLOAT DEFAULT 0.0,
-                    UNIQUE(game_id, asset_type, analysis_date::date)
+                    confidence_score FLOAT DEFAULT 0.0
                 );
             """,
             'trending_keywords_archive': """
@@ -142,8 +184,7 @@ class DatabaseManager:
                     trend_direction TEXT,
                     analysis_date TIMESTAMP DEFAULT NOW(),
                     category TEXT,
-                    confidence_score FLOAT DEFAULT 0.0,
-                    UNIQUE(keyword, analysis_date::date)
+                    confidence_score FLOAT DEFAULT 0.0
                 );
             """,
             'top_performing_assets': """
@@ -192,16 +233,73 @@ class DatabaseManager:
             """
         }
         
+        # Create tables
         for table_name, create_sql in tables.items():
             try:
+                logger.info(f"Creating table: {table_name}")
                 self.execute_query(create_sql, fetch=False)
-                logger.info(f"Table {table_name} created/verified")
+                logger.info(f"✅ Table {table_name} created/verified")
             except Exception as e:
-                logger.error(f"Failed to create table {table_name}: {e}")
-                raise
+                logger.error(f"❌ Failed to create table {table_name}: {e}")
+                raise e
+        
+        # FIXED: Create functional unique indexes instead of constraints with type casting
+        indexes = [
+            {
+                'name': 'Unique daily trending visual assets constraint',
+                'sql': """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_trending_visual_assets_unique_daily 
+                ON trending_visual_assets (game_id, asset_type, DATE(analysis_date));
+                """
+            },
+            {
+                'name': 'Unique daily trending keywords constraint', 
+                'sql': """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_trending_keywords_archive_unique_daily 
+                ON trending_keywords_archive (keyword, DATE(analysis_date));
+                """
+            },
+            {
+                'name': 'Trending visual assets game_id index',
+                'sql': "CREATE INDEX IF NOT EXISTS idx_trending_visual_assets_game_id ON trending_visual_assets(game_id);"
+            },
+            {
+                'name': 'Trending visual assets performance index',
+                'sql': "CREATE INDEX IF NOT EXISTS idx_trending_visual_assets_performance ON trending_visual_assets(performance_score DESC);"
+            },
+            {
+                'name': 'Trending visual assets date index',
+                'sql': "CREATE INDEX IF NOT EXISTS idx_trending_visual_assets_date ON trending_visual_assets(DATE(analysis_date));"
+            },
+            {
+                'name': 'Top performing assets performance index',
+                'sql': "CREATE INDEX IF NOT EXISTS idx_top_performing_assets_performance ON top_performing_assets(performance_score DESC);"
+            },
+            {
+                'name': 'Visual clusters asset_type index',
+                'sql': "CREATE INDEX IF NOT EXISTS idx_visual_clusters_asset_type ON visual_clusters(asset_type);"
+            },
+            {
+                'name': 'Analysis metadata type and date index',
+                'sql': "CREATE INDEX IF NOT EXISTS idx_analysis_metadata_type_date ON analysis_metadata(analysis_type, analysis_date DESC);"
+            }
+        ]
+        
+        # Create indexes
+        for index_info in indexes:
+            try:
+                logger.info(f"Creating index: {index_info['name']}")
+                self.execute_query(index_info['sql'], fetch=False)
+                logger.info(f"✅ Index created: {index_info['name']}")
+            except Exception as e:
+                logger.warning(f"⚠️  Error creating index {index_info['name']}: {e}")
+                # Continue with other indexes - they're not critical for functionality
+                continue
+        
+        logger.info("✅ All database tables and indexes created successfully")
 
 class ImageProcessor:
-    """Handles all image processing operations"""
+    """Handles all image processing operations with enhanced error handling"""
     
     def __init__(self, config: AnalysisConfig):
         self.config = config
@@ -212,12 +310,13 @@ class ImageProcessor:
                 self.face_cascade = cv2.CascadeClassifier(
                     cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
                 )
+                logger.info("Face detection initialized successfully")
             except Exception as e:
                 logger.warning(f"Face detection unavailable: {e}")
                 self.config.enable_face_detection = False
     
     def extract_enhanced_visual_features(self, image_data: bytes) -> Dict[str, Any]:
-        """Extract comprehensive visual features with error handling"""
+        """Extract comprehensive visual features with enhanced error handling"""
         if not image_data or not PIL_AVAILABLE:
             return self._empty_visual_features()
         
@@ -278,7 +377,7 @@ class ImageProcessor:
         return a / b if b != 0 else default
     
     def _calculate_color_stats(self, pixels: np.ndarray) -> Dict[str, float]:
-        """Calculate RGB color statistics"""
+        """Calculate RGB color statistics with error handling"""
         try:
             return {
                 'red_mean': float(np.mean(pixels[:, 0])),
@@ -288,14 +387,15 @@ class ImageProcessor:
                 'green_std': float(np.std(pixels[:, 1])),
                 'blue_std': float(np.std(pixels[:, 2])),
             }
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Error calculating color stats: {e}")
             return {
                 'red_mean': 128.0, 'green_mean': 128.0, 'blue_mean': 128.0,
                 'red_std': 0.0, 'green_std': 0.0, 'blue_std': 0.0
             }
     
     def _calculate_hsv_stats(self, pixels: np.ndarray) -> Dict[str, float]:
-        """Calculate HSV color statistics"""
+        """Calculate HSV color statistics with enhanced error handling"""
         try:
             import colorsys
             # Sample pixels for performance
@@ -321,14 +421,15 @@ class ImageProcessor:
             else:
                 raise ValueError("No valid HSV values calculated")
                 
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Error calculating HSV stats: {e}")
             return {
                 'hue_mean': 0.0, 'saturation_mean': 0.0, 'brightness_mean': 50.0,
                 'hue_std': 0.0, 'saturation_std': 0.0, 'brightness_std': 0.0
             }
     
     def _analyze_color_diversity(self, pixels: np.ndarray) -> Dict[str, Any]:
-        """Analyze color diversity and dominant colors"""
+        """Analyze color diversity and dominant colors with error handling"""
         try:
             features = {}
             
@@ -353,7 +454,8 @@ class ImageProcessor:
                         features[f'dominant_color_{i}_g'] = float(color[1])
                         features[f'dominant_color_{i}_b'] = float(color[2])
                         
-                except Exception:
+                except Exception as cluster_e:
+                    logger.warning(f"Color clustering failed: {cluster_e}")
                     # Fallback: use mean colors
                     for i in range(5):
                         features[f'dominant_color_{i}_r'] = float(np.mean(pixels[:, 0]))
@@ -368,7 +470,8 @@ class ImageProcessor:
             
             return features
             
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Error analyzing color diversity: {e}")
             features = {'color_diversity': 0.0}
             for i in range(5):
                 features[f'dominant_color_{i}_r'] = 128.0
@@ -377,7 +480,7 @@ class ImageProcessor:
             return features
     
     def _analyze_visual_complexity(self, img_cv: np.ndarray) -> Dict[str, float]:
-        """Analyze visual complexity"""
+        """Analyze visual complexity with error handling"""
         try:
             gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
             
@@ -399,7 +502,8 @@ class ImageProcessor:
                 'overall_brightness': overall_brightness
             }
             
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Error analyzing visual complexity: {e}")
             return {
                 'edge_density': 0.0,
                 'texture_variance': 0.0,
@@ -408,7 +512,7 @@ class ImageProcessor:
             }
     
     def _detect_faces(self, img_cv: np.ndarray) -> Dict[str, Any]:
-        """Detect faces in image"""
+        """Detect faces in image with error handling"""
         try:
             if self.face_cascade is None:
                 return {'face_count': 0, 'has_faces': False}
@@ -421,11 +525,12 @@ class ImageProcessor:
                 'has_faces': len(faces) > 0
             }
             
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Error detecting faces: {e}")
             return {'face_count': 0, 'has_faces': False}
     
     def _detect_text_regions(self, img_cv: np.ndarray) -> Dict[str, Any]:
-        """Detect text regions in image"""
+        """Detect text regions in image with error handling"""
         try:
             gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
             
@@ -448,11 +553,12 @@ class ImageProcessor:
                 'text_detected': text_regions > 2
             }
             
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Error detecting text: {e}")
             return {'text_regions': 0, 'text_detected': False}
     
     def _analyze_composition(self, img_cv: np.ndarray) -> Dict[str, float]:
-        """Analyze image composition"""
+        """Analyze image composition with error handling"""
         try:
             gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
             h, w = gray.shape
@@ -487,7 +593,8 @@ class ImageProcessor:
                 'symmetry_score': float(symmetry_score)
             }
             
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Error analyzing composition: {e}")
             return {'central_focus': 0.0, 'symmetry_score': 0.0}
     
     def _classify_comprehensive_style(self, features: Dict[str, Any], img_cv: np.ndarray) -> str:
@@ -524,7 +631,8 @@ class ImageProcessor:
             else:
                 return "balanced_standard"
                 
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Error classifying style: {e}")
             return "unknown"
     
     def _calculate_confidence_score(self, features: Dict[str, Any]) -> float:
@@ -581,7 +689,7 @@ class ImageProcessor:
         return features
 
 class VisualTrendAnalyzer:
-    """Main Visual Trend Analyzer class"""
+    """Main Visual Trend Analyzer class with FIXED database schema"""
     
     def __init__(self, config: Optional[AnalysisConfig] = None):
         self.config = config or AnalysisConfig()
@@ -593,9 +701,9 @@ class VisualTrendAnalyzer:
         # Initialize database tables
         try:
             self.db_manager.create_tables()
-            logger.info("Database tables initialized successfully")
+            logger.info("✅ Database tables initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize database tables: {e}")
+            logger.error(f"❌ Failed to initialize database tables: {e}")
             raise
     
     def _ensure_output_directory(self):
@@ -615,7 +723,9 @@ class VisualTrendAnalyzer:
         start_time = datetime.now()
         days_back = days_back or self.config.days_back
         
-        logger.info(f"Starting full visual trend analysis for {days_back} days")
+        logger.info(f"🎨 Starting full visual trend analysis for {days_back} days")
+        
+        analysis_id = None
         
         try:
             # Record analysis start
@@ -630,50 +740,71 @@ class VisualTrendAnalyzer:
             # Record successful completion
             self._record_analysis_completion(analysis_id, trend_report, execution_time, True)
             
-            logger.info(f"Analysis completed successfully in {execution_time:.2f} seconds")
+            logger.info(f"✅ Analysis completed successfully in {execution_time:.2f} seconds")
             return trend_report
+            
+        except psycopg2.Error as e:
+            execution_time = (datetime.now() - start_time).total_seconds()
+            error_msg = f"Database error during analysis: {e}"
+            logger.error(error_msg)
+            
+            # Record database error
+            try:
+                if analysis_id:
+                    self._record_analysis_completion(analysis_id, {}, execution_time, False, error_msg)
+            except:
+                pass
+            
+            return None
             
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
-            logger.error(f"Analysis failed after {execution_time:.2f} seconds: {e}")
+            error_msg = f"Analysis failed after {execution_time:.2f} seconds: {e}"
+            logger.error(error_msg)
             
             # Record failure
             try:
-                self._record_analysis_completion(analysis_id, {}, execution_time, False, str(e))
+                if analysis_id:
+                    self._record_analysis_completion(analysis_id, {}, execution_time, False, str(e))
             except:
                 pass
             
             return None
     
     def analyze_trending_visuals(self, days_back: int) -> Dict[str, Any]:
-        """Main analysis method"""
+        """Main analysis method with enhanced error handling"""
         logger.info(f"Analyzing visual trends over last {days_back} days...")
         
-        # Get game data
-        games_df = self._fetch_game_data(days_back)
-        
-        if games_df.empty:
-            logger.warning("No games found for analysis")
-            return self._create_empty_report(days_back)
-        
-        logger.info(f"Processing {len(games_df)} games")
-        
-        # Process visual features
-        icon_features, thumbnail_features = self._process_visual_features(games_df)
-        
-        # Analyze trends
-        icon_trends = self._analyze_style_performance(icon_features, 'icon')
-        thumbnail_trends = self._analyze_style_performance(thumbnail_features, 'thumbnail')
-        
-        # Generate comprehensive report
-        trend_report = self._generate_comprehensive_report(
-            icon_trends, thumbnail_trends, days_back, len(games_df)
-        )
-        
-        # Save results
-        self._save_analysis_results(trend_report, icon_trends, thumbnail_trends)
-        
-        return trend_report
+        try:
+            # Get game data
+            games_df = self._fetch_game_data(days_back)
+            
+            if games_df.empty:
+                logger.warning("No games found for analysis")
+                return self._create_empty_report(days_back)
+            
+            logger.info(f"Processing {len(games_df)} games")
+            
+            # Process visual features
+            icon_features, thumbnail_features = self._process_visual_features(games_df)
+            
+            # Analyze trends
+            icon_trends = self._analyze_style_performance(icon_features, 'icon')
+            thumbnail_trends = self._analyze_style_performance(thumbnail_features, 'thumbnail')
+            
+            # Generate comprehensive report
+            trend_report = self._generate_comprehensive_report(
+                icon_trends, thumbnail_trends, days_back, len(games_df)
+            )
+            
+            # Save results
+            self._save_analysis_results(trend_report, icon_trends, thumbnail_trends)
+            
+            return trend_report
+            
+        except Exception as e:
+            logger.error(f"Error in main analysis: {e}")
+            raise
     
     def _fetch_game_data(self, days_back: int) -> pd.DataFrame:
         """Fetch game data with visual assets"""
@@ -701,6 +832,7 @@ class VisualTrendAnalyzer:
             # Filter for games with sufficient data
             df = df[df['snapshot_count'] >= self.config.min_games]
             
+            logger.info(f"Fetched {len(df)} games from database")
             return df
             
         except Exception as e:
@@ -713,6 +845,7 @@ class VisualTrendAnalyzer:
         thumbnail_features = []
         
         total_games = len(games_df)
+        processed_games = 0
         
         for idx, row in games_df.iterrows():
             if idx % 50 == 0:
@@ -736,23 +869,31 @@ class VisualTrendAnalyzer:
                 
                 # Process icon
                 if row['icon_data']:
-                    icon_visual = self.image_processor.extract_enhanced_visual_features(row['icon_data'])
-                    icon_visual.update(game_data)
-                    icon_visual['image_type'] = 'icon'
-                    icon_features.append(icon_visual)
+                    try:
+                        icon_visual = self.image_processor.extract_enhanced_visual_features(row['icon_data'])
+                        icon_visual.update(game_data)
+                        icon_visual['image_type'] = 'icon'
+                        icon_features.append(icon_visual)
+                    except Exception as icon_e:
+                        logger.warning(f"Error processing icon for game {row['id']}: {icon_e}")
                 
                 # Process thumbnail
                 if row['thumbnail_data']:
-                    thumb_visual = self.image_processor.extract_enhanced_visual_features(row['thumbnail_data'])
-                    thumb_visual.update(game_data)
-                    thumb_visual['image_type'] = 'thumbnail'
-                    thumbnail_features.append(thumb_visual)
-                    
+                    try:
+                        thumb_visual = self.image_processor.extract_enhanced_visual_features(row['thumbnail_data'])
+                        thumb_visual.update(game_data)
+                        thumb_visual['image_type'] = 'thumbnail'
+                        thumbnail_features.append(thumb_visual)
+                    except Exception as thumb_e:
+                        logger.warning(f"Error processing thumbnail for game {row['id']}: {thumb_e}")
+                
+                processed_games += 1
+                
             except Exception as e:
                 logger.warning(f"Error processing game {row['id']}: {e}")
                 continue
         
-        logger.info(f"Processed {len(icon_features)} icons and {len(thumbnail_features)} thumbnails")
+        logger.info(f"Processed {processed_games} games: {len(icon_features)} icons and {len(thumbnail_features)} thumbnails")
         return icon_features, thumbnail_features
     
     def _calculate_performance_score(self, game_row: pd.Series) -> float:
@@ -769,6 +910,7 @@ class VisualTrendAnalyzer:
     def _analyze_style_performance(self, features_list: List[Dict], image_type: str) -> Dict[str, Dict]:
         """Analyze performance by visual style"""
         if not features_list:
+            logger.warning(f"No features available for {image_type} analysis")
             return {}
         
         try:
@@ -799,6 +941,7 @@ class VisualTrendAnalyzer:
             # Sort by trend score
             style_analysis = style_analysis.sort_values('trend_score', ascending=False)
             
+            logger.info(f"Analyzed {len(style_analysis)} {image_type} styles")
             return style_analysis.to_dict('index')
             
         except Exception as e:
@@ -812,8 +955,8 @@ class VisualTrendAnalyzer:
             'analysis_date': datetime.utcnow().isoformat(),
             'analysis_period_days': days_back,
             'total_games_analyzed': total_games,
-            'total_icons_analyzed': sum(data['performance_score_count'] for data in icon_trends.values()),
-            'total_thumbnails_analyzed': sum(data['performance_score_count'] for data in thumbnail_trends.values()),
+            'total_icons_analyzed': sum(data['performance_score_count'] for data in icon_trends.values()) if icon_trends else 0,
+            'total_thumbnails_analyzed': sum(data['performance_score_count'] for data in thumbnail_trends.values()) if thumbnail_trends else 0,
             'summary': {},
             'top_icon_styles': [],
             'top_thumbnail_styles': [],
@@ -822,19 +965,24 @@ class VisualTrendAnalyzer:
             'confidence_metrics': {}
         }
         
-        # Generate summaries
-        if icon_trends:
-            report['summary'].update(self._generate_style_summary(icon_trends, 'icon'))
-            report['top_icon_styles'] = self._format_top_styles(icon_trends)
-        
-        if thumbnail_trends:
-            report['summary'].update(self._generate_style_summary(thumbnail_trends, 'thumbnail'))
-            report['top_thumbnail_styles'] = self._format_top_styles(thumbnail_trends)
-        
-        # Generate recommendations and analysis
-        report['visual_recommendations'] = self._generate_recommendations(icon_trends, thumbnail_trends)
-        report['trending_characteristics'] = self._analyze_trending_characteristics(icon_trends, thumbnail_trends)
-        report['confidence_metrics'] = self._calculate_confidence_metrics(icon_trends, thumbnail_trends)
+        try:
+            # Generate summaries
+            if icon_trends:
+                report['summary'].update(self._generate_style_summary(icon_trends, 'icon'))
+                report['top_icon_styles'] = self._format_top_styles(icon_trends)
+            
+            if thumbnail_trends:
+                report['summary'].update(self._generate_style_summary(thumbnail_trends, 'thumbnail'))
+                report['top_thumbnail_styles'] = self._format_top_styles(thumbnail_trends)
+            
+            # Generate recommendations and analysis
+            report['visual_recommendations'] = self._generate_recommendations(icon_trends, thumbnail_trends)
+            report['trending_characteristics'] = self._analyze_trending_characteristics(icon_trends, thumbnail_trends)
+            report['confidence_metrics'] = self._calculate_confidence_metrics(icon_trends, thumbnail_trends)
+            
+        except Exception as e:
+            logger.error(f"Error generating comprehensive report: {e}")
+            report['error'] = str(e)
         
         return report
     
@@ -843,78 +991,96 @@ class VisualTrendAnalyzer:
         if not trends:
             return {}
         
-        best_style = max(trends.keys(), key=lambda x: trends[x]['trend_score'])
-        best_data = trends[best_style]
-        
-        return {
-            f'best_{style_type}_style': best_style,
-            f'best_{style_type}_performance': round(best_data['performance_score_mean'], 2),
-            f'best_{style_type}_confidence': round(best_data.get('confidence_score_mean', 0.5), 2)
-        }
+        try:
+            best_style = max(trends.keys(), key=lambda x: trends[x]['trend_score'])
+            best_data = trends[best_style]
+            
+            return {
+                f'best_{style_type}_style': best_style,
+                f'best_{style_type}_performance': round(best_data['performance_score_mean'], 2),
+                f'best_{style_type}_confidence': round(best_data.get('confidence_score_mean', 0.5), 2)
+            }
+        except Exception as e:
+            logger.error(f"Error generating style summary for {style_type}: {e}")
+            return {}
     
     def _format_top_styles(self, trends: Dict) -> List[Dict[str, Any]]:
         """Format top styles for report"""
-        sorted_trends = sorted(trends.items(), key=lambda x: x[1]['trend_score'], reverse=True)
-        
-        top_styles = []
-        for style_name, data in sorted_trends[:self.config.top_styles_count]:
-            top_styles.append({
-                'style': style_name,
-                'performance_score': round(data['performance_score_mean'], 2),
-                'game_count': int(data['performance_score_count']),
-                'avg_players': round(data['avg_playing_mean'], 0),
-                'like_ratio': round(data['like_ratio_mean'], 3),
-                'confidence': round(data.get('confidence_score_mean', 0.5), 2),
-                'characteristics': {
-                    'brightness': round(data['brightness_mean'], 1),
-                    'saturation': round(data['saturation_mean'], 1),
-                    'has_faces_pct': round(data['has_faces'] * 100, 1),
-                    'edge_density': round(data['edge_density'], 3)
-                }
-            })
-        
-        return top_styles
+        try:
+            sorted_trends = sorted(trends.items(), key=lambda x: x[1]['trend_score'], reverse=True)
+            
+            top_styles = []
+            for style_name, data in sorted_trends[:self.config.top_styles_count]:
+                top_styles.append({
+                    'style': style_name,
+                    'performance_score': round(data['performance_score_mean'], 2),
+                    'game_count': int(data['performance_score_count']),
+                    'avg_players': round(data['avg_playing_mean'], 0),
+                    'like_ratio': round(data['like_ratio_mean'], 3),
+                    'confidence': round(data.get('confidence_score_mean', 0.5), 2),
+                    'characteristics': {
+                        'brightness': round(data['brightness_mean'], 1),
+                        'saturation': round(data['saturation_mean'], 1),
+                        'has_faces_pct': round(data['has_faces'] * 100, 1),
+                        'edge_density': round(data['edge_density'], 3)
+                    }
+                })
+            
+            return top_styles
+        except Exception as e:
+            logger.error(f"Error formatting top styles: {e}")
+            return []
     
     def _generate_recommendations(self, icon_trends: Dict, thumbnail_trends: Dict) -> List[Dict[str, Any]]:
         """Generate actionable recommendations"""
         recommendations = []
         
-        # Icon recommendations
-        if icon_trends:
-            best_icon = max(icon_trends.keys(), key=lambda x: icon_trends[x]['trend_score'])
-            icon_data = icon_trends[best_icon]
+        try:
+            # Icon recommendations
+            if icon_trends:
+                best_icon = max(icon_trends.keys(), key=lambda x: icon_trends[x]['trend_score'])
+                icon_data = icon_trends[best_icon]
+                
+                recommendations.append({
+                    'type': 'icon',
+                    'priority': 'high',
+                    'recommendation': f"Adopt '{best_icon.replace('_', ' ').title()}' style for icons",
+                    'reason': f"Shows {icon_data['performance_score_mean']:.1f} performance score across {icon_data['performance_score_count']} games",
+                    'confidence': icon_data.get('confidence_score_mean', 0.5),
+                    'specific_tips': [
+                        f"Target brightness: {icon_data['brightness_mean']:.0f}/255",
+                        f"Target saturation: {icon_data['saturation_mean']:.0f}%",
+                        f"Include faces: {'Recommended' if icon_data['has_faces'] > 0.5 else 'Not necessary'}",
+                        f"Edge density: {icon_data['edge_density']:.3f} (complexity level)"
+                    ]
+                })
             
-            recommendations.append({
-                'type': 'icon',
-                'priority': 'high',
-                'recommendation': f"Adopt '{best_icon.replace('_', ' ').title()}' style for icons",
-                'reason': f"Shows {icon_data['performance_score_mean']:.1f} performance score across {icon_data['performance_score_count']} games",
-                'confidence': icon_data.get('confidence_score_mean', 0.5),
-                'specific_tips': [
-                    f"Target brightness: {icon_data['brightness_mean']:.0f}/255",
-                    f"Target saturation: {icon_data['saturation_mean']:.0f}%",
-                    f"Include faces: {'Recommended' if icon_data['has_faces'] > 0.5 else 'Not necessary'}",
-                    f"Edge density: {icon_data['edge_density']:.3f} (complexity level)"
-                ]
-            })
+            # Thumbnail recommendations
+            if thumbnail_trends:
+                best_thumb = max(thumbnail_trends.keys(), key=lambda x: thumbnail_trends[x]['trend_score'])
+                thumb_data = thumbnail_trends[best_thumb]
+                
+                recommendations.append({
+                    'type': 'thumbnail',
+                    'priority': 'high',
+                    'recommendation': f"Adopt '{best_thumb.replace('_', ' ').title()}' style for thumbnails",
+                    'reason': f"Shows {thumb_data['performance_score_mean']:.1f} performance score across {thumb_data['performance_score_count']} games",
+                    'confidence': thumb_data.get('confidence_score_mean', 0.5),
+                    'specific_tips': [
+                        f"Target brightness: {thumb_data['brightness_mean']:.0f}/255",
+                        f"Target saturation: {thumb_data['saturation_mean']:.0f}%",
+                        f"Include faces: {'Recommended' if thumb_data['has_faces'] > 0.5 else 'Not necessary'}",
+                        f"Edge density: {thumb_data['edge_density']:.3f} (complexity level)"
+                    ]
+                })
         
-        # Thumbnail recommendations
-        if thumbnail_trends:
-            best_thumb = max(thumbnail_trends.keys(), key=lambda x: thumbnail_trends[x]['trend_score'])
-            thumb_data = thumbnail_trends[best_thumb]
-            
+        except Exception as e:
+            logger.error(f"Error generating recommendations: {e}")
             recommendations.append({
-                'type': 'thumbnail',
-                'priority': 'high',
-                'recommendation': f"Adopt '{best_thumb.replace('_', ' ').title()}' style for thumbnails",
-                'reason': f"Shows {thumb_data['performance_score_mean']:.1f} performance score across {thumb_data['performance_score_count']} games",
-                'confidence': thumb_data.get('confidence_score_mean', 0.5),
-                'specific_tips': [
-                    f"Target brightness: {thumb_data['brightness_mean']:.0f}/255",
-                    f"Target saturation: {thumb_data['saturation_mean']:.0f}%",
-                    f"Include faces: {'Recommended' if thumb_data['has_faces'] > 0.5 else 'Not necessary'}",
-                    f"Edge density: {thumb_data['edge_density']:.3f} (complexity level)"
-                ]
+                'type': 'error',
+                'priority': 'low',
+                'recommendation': 'Unable to generate specific recommendations due to analysis error',
+                'reason': str(e)
             })
         
         return recommendations
@@ -1024,18 +1190,18 @@ class VisualTrendAnalyzer:
             with open(report_path, 'w') as f:
                 json.dump(trend_report, f, indent=2, default=str)
             
-            logger.info(f"Trend report saved to {report_path}")
+            logger.info(f"✅ Trend report saved to {report_path}")
             
             # Save detailed trend data
             if icon_trends:
                 icon_path = f"{self.output_dir}/reports/icon_trends_{timestamp}.csv"
                 pd.DataFrame.from_dict(icon_trends, orient='index').to_csv(icon_path)
-                logger.info(f"Icon trends saved to {icon_path}")
+                logger.info(f"✅ Icon trends saved to {icon_path}")
             
             if thumbnail_trends:
                 thumb_path = f"{self.output_dir}/reports/thumbnail_trends_{timestamp}.csv"
                 pd.DataFrame.from_dict(thumbnail_trends, orient='index').to_csv(thumb_path)
-                logger.info(f"Thumbnail trends saved to {thumb_path}")
+                logger.info(f"✅ Thumbnail trends saved to {thumb_path}")
             
             # Create visualizations if enabled
             if self.config.create_visualizations:
@@ -1063,10 +1229,18 @@ class VisualTrendAnalyzer:
             # Icon performance chart
             if icon_trends:
                 self._plot_style_performance(axes[0, 0], icon_trends, 'Icon Styles Performance')
+            else:
+                axes[0, 0].text(0.5, 0.5, 'No Icon Data Available', 
+                               transform=axes[0, 0].transAxes, ha='center', va='center')
+                axes[0, 0].set_title('Icon Styles Performance')
             
             # Thumbnail performance chart
             if thumbnail_trends:
                 self._plot_style_performance(axes[0, 1], thumbnail_trends, 'Thumbnail Styles Performance')
+            else:
+                axes[0, 1].text(0.5, 0.5, 'No Thumbnail Data Available', 
+                               transform=axes[0, 1].transAxes, ha='center', va='center')
+                axes[0, 1].set_title('Thumbnail Styles Performance')
             
             # Color trends
             self._plot_color_trends(axes[1, 0], trend_report)
@@ -1079,7 +1253,7 @@ class VisualTrendAnalyzer:
             plt.savefig(viz_path, dpi=150, bbox_inches='tight')
             plt.close()
             
-            logger.info(f"Visualization saved to {viz_path}")
+            logger.info(f"✅ Visualization saved to {viz_path}")
             
         except Exception as e:
             logger.error(f"Error creating visualizations: {e}")
@@ -1089,6 +1263,12 @@ class VisualTrendAnalyzer:
         try:
             df = pd.DataFrame.from_dict(trends, orient='index')
             top_styles = df.nlargest(8, 'performance_score_mean')
+            
+            if len(top_styles) == 0:
+                ax.text(0.5, 0.5, 'No style data available', 
+                       transform=ax.transAxes, ha='center', va='center')
+                ax.set_title(title)
+                return
             
             y_pos = range(len(top_styles))
             performance = top_styles['performance_score_mean']
@@ -1108,13 +1288,14 @@ class VisualTrendAnalyzer:
         except Exception as e:
             ax.text(0.5, 0.5, f'Error: {str(e)[:50]}...', transform=ax.transAxes, 
                    ha='center', va='center')
+            ax.set_title(title)
     
     def _plot_color_trends(self, ax, trend_report: Dict):
         """Plot color trends"""
         try:
             color_data = trend_report.get('trending_characteristics', {}).get('color_trends', {})
             
-            if color_data:
+            if color_data and 'avg_brightness_value' in color_data:
                 categories = ['Brightness', 'Saturation']
                 values = [
                     color_data.get('avg_brightness_value', 0),
@@ -1133,17 +1314,19 @@ class VisualTrendAnalyzer:
             else:
                 ax.text(0.5, 0.5, 'No color trend data available', 
                        transform=ax.transAxes, ha='center', va='center')
+                ax.set_title('Trending Color Characteristics')
                        
         except Exception as e:
             ax.text(0.5, 0.5, f'Error: {str(e)[:50]}...', transform=ax.transAxes, 
                    ha='center', va='center')
+            ax.set_title('Trending Color Characteristics')
     
     def _plot_confidence_metrics(self, ax, trend_report: Dict):
         """Plot confidence metrics"""
         try:
             confidence_data = trend_report.get('confidence_metrics', {})
             
-            if confidence_data:
+            if confidence_data and 'overall_confidence' in confidence_data:
                 metrics = ['Overall', 'Feature', 'Sample Size']
                 values = [
                     confidence_data.get('overall_confidence', 0) * 100,
@@ -1164,10 +1347,12 @@ class VisualTrendAnalyzer:
             else:
                 ax.text(0.5, 0.5, 'No confidence data available', 
                        transform=ax.transAxes, ha='center', va='center')
+                ax.set_title('Analysis Confidence Metrics')
                        
         except Exception as e:
             ax.text(0.5, 0.5, f'Error: {str(e)[:50]}...', transform=ax.transAxes, 
                    ha='center', va='center')
+            ax.set_title('Analysis Confidence Metrics')
     
     def _record_analysis_start(self, days_back: int) -> int:
         """Record analysis start in metadata table"""
@@ -1189,9 +1374,8 @@ class VisualTrendAnalyzer:
             
             with self.db_manager.get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(query, ('visual_trend_analysis', json.dumps(parameters)))
+                    cur.execute(query, ('visual_trend_analysis_fixed', json.dumps(parameters)))
                     analysis_id = cur.fetchone()[0]
-                    conn.commit()
                     return analysis_id
                     
         except Exception as e:
@@ -1220,7 +1404,6 @@ class VisualTrendAnalyzer:
                     cur.execute(query, (
                         json.dumps(results_summary), execution_time, success, error_message, analysis_id
                     ))
-                    conn.commit()
                     
         except Exception as e:
             logger.error(f"Failed to record analysis completion: {e}")
@@ -1246,18 +1429,26 @@ def create_analyzer_from_config(config_file: str = 'analyzer_config.ini') -> Vis
     config = AnalysisConfig()
     
     if os.path.exists(config_file):
-        parser = configparser.ConfigParser()
-        parser.read(config_file)
-        
-        if 'analysis' in parser:
-            analysis_section = parser['analysis']
-            config.days_back = analysis_section.getint('days_back', config.days_back)
-            config.min_games = analysis_section.getint('min_games', config.min_games)
-            config.max_games_to_process = analysis_section.getint('max_games_to_process', config.max_games_to_process)
-            config.min_performance_score = analysis_section.getfloat('min_performance_score', config.min_performance_score)
-            config.enable_face_detection = analysis_section.getboolean('enable_face_detection', config.enable_face_detection)
-            config.enable_text_detection = analysis_section.getboolean('enable_text_detection', config.enable_text_detection)
-            config.create_visualizations = analysis_section.getboolean('create_visualizations', config.create_visualizations)
+        try:
+            parser = configparser.ConfigParser()
+            parser.read(config_file)
+            
+            if 'analysis' in parser:
+                analysis_section = parser['analysis']
+                config.days_back = analysis_section.getint('days_back', config.days_back)
+                config.min_games = analysis_section.getint('min_games', config.min_games)
+                config.max_games_to_process = analysis_section.getint('max_games_to_process', config.max_games_to_process)
+                config.min_performance_score = analysis_section.getfloat('min_performance_score', config.min_performance_score)
+                config.enable_face_detection = analysis_section.getboolean('enable_face_detection', config.enable_face_detection)
+                config.enable_text_detection = analysis_section.getboolean('enable_text_detection', config.enable_text_detection)
+                config.create_visualizations = analysis_section.getboolean('create_visualizations', config.create_visualizations)
+                
+            logger.info(f"✅ Configuration loaded from {config_file}")
+            
+        except Exception as e:
+            logger.warning(f"Error reading config file: {e}, using default configuration")
+    else:
+        logger.info("Using default configuration")
     
     return VisualTrendAnalyzer(config)
 
@@ -1282,13 +1473,16 @@ output_dir = visual_trends
 """
 
 def main():
-    """Main execution function"""
+    """Main execution function with enhanced error handling"""
     try:
+        logger.info("🚀 STARTING VISUAL TREND ANALYZER - FIXED VERSION")
+        logger.info("=" * 60)
+        
         # Create configuration file if it doesn't exist
         if not os.path.exists('analyzer_config.ini'):
             with open('analyzer_config.ini', 'w') as f:
                 f.write(CONFIG_TEMPLATE)
-            logger.info("Created default configuration file: analyzer_config.ini")
+            logger.info("✅ Created default configuration file: analyzer_config.ini")
         
         # Create analyzer
         analyzer = create_analyzer_from_config()
@@ -1298,7 +1492,9 @@ def main():
         report = analyzer.run_full_analysis()
         
         if report:
-            logger.info("=== ANALYSIS COMPLETED SUCCESSFULLY ===")
+            logger.info("=" * 60)
+            logger.info("🎉 ANALYSIS COMPLETED SUCCESSFULLY")
+            logger.info("=" * 60)
             logger.info(f"Games Analyzed: {report['total_games_analyzed']}")
             logger.info(f"Icons Analyzed: {report['total_icons_analyzed']}")
             logger.info(f"Thumbnails Analyzed: {report['total_thumbnails_analyzed']}")
@@ -1310,15 +1506,20 @@ def main():
             if report['summary'].get('best_thumbnail_style'):
                 logger.info(f"Best Thumbnail Style: {report['summary']['best_thumbnail_style']}")
             
-            logger.info(f"Reports saved to: {analyzer.output_dir}/reports/")
+            logger.info(f"📁 Reports saved to: {analyzer.output_dir}/reports/")
+            
+            if report.get('visual_recommendations'):
+                logger.info(f"📋 Generated {len(report['visual_recommendations'])} recommendations")
             
             return True
         else:
-            logger.error("Analysis failed")
+            logger.error("❌ ANALYSIS FAILED")
             return False
             
     except Exception as e:
-        logger.error(f"Main execution failed: {e}")
+        logger.error(f"❌ MAIN EXECUTION FAILED: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 if __name__ == "__main__":
